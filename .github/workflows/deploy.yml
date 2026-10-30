@@ -9,11 +9,9 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,26 +22,30 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - name: Upload site
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
 
   deploy:
+    # Deploy to Cloudflare Workers on pushes to main (and manual runs), never for pull requests.
     if: github.event_name != 'pull_request'
-    needs: build
+    needs: test
     runs-on: ubuntu-latest
     concurrency:
-      group: pages
+      group: cloudflare-deploy
       cancel-in-progress: false
     environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      name: production
+      url: ${{ steps.deploy.outputs.deployment-url }}
     steps:
-      - name: Enable GitHub Pages
-        uses: actions/configure-pages@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          enablement: true
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Deploy with Wrangler
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy

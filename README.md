@@ -36,9 +36,26 @@ The app is a static site (Vite + React + TypeScript) with no backend. Everything
 
 ## Deployment
 
-Every push to `main` runs `.github/workflows/deploy.yml`, which installs dependencies, runs the tests, builds the site and publishes `dist/` to GitHub Pages at https://timgeronimolam.github.io/Mosaica/. Pull requests run the tests and build only.
+Mosaica is deployed to **Cloudflare Workers** as a static-assets Worker, configured in `wrangler.jsonc`.
 
-The site is fully static, so the same `dist/` folder can be dropped onto any static host (Netlify, Vercel, S3, a plain web server).
+Every push to `main` runs `.github/workflows/deploy.yml`: it installs dependencies, runs the tests, builds the site and deploys `dist/` with Wrangler. Pull requests run the tests and build only. The workflow needs two repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Where to get it |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare dashboard → My Profile → API Tokens → Create Token → use the **Edit Cloudflare Workers** template |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare dashboard → Workers & Pages → Overview (right-hand sidebar) |
+
+After the first deploy the site is served at `https://mosaica.<your-account-subdomain>.workers.dev`. To use your own domain, add a `routes` entry with `custom_domain: true` to `wrangler.jsonc` (the zone must be on Cloudflare).
+
+Deploying from your machine works too:
+
+```bash
+npx wrangler login     # once
+npm run deploy         # build + wrangler deploy
+npm run preview:cf     # serve the build locally through the Workers runtime
+```
+
+The site is fully static, so the same `dist/` folder can also be dropped onto any other static host.
 
 ## Project layout
 
