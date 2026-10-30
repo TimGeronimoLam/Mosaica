@@ -34,6 +34,12 @@ npm run preview    # serve the production build
 
 The app is a static site (Vite + React + TypeScript) with no backend. Everything you make stays in your browser unless you export it.
 
+## Deployment
+
+Every push to `main` runs `.github/workflows/deploy.yml`, which installs dependencies, runs the tests, builds the site and publishes `dist/` to GitHub Pages at https://timgeronimolam.github.io/Mosaica/. Pull requests run the tests and build only.
+
+The site is fully static, so the same `dist/` folder can be dropped onto any static host (Netlify, Vercel, S3, a plain web server).
+
 ## Project layout
 
 ```
