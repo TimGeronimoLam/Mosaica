@@ -36,9 +36,26 @@ The app is a static site (Vite + React + TypeScript) with no backend. Everything
 
 ## Deployment
 
-Every push to `main` runs `.github/workflows/deploy.yml`, which installs dependencies, runs the tests, builds the site and publishes `dist/` to GitHub Pages at https://timgeronimolam.github.io/Mosaica/. Pull requests run the tests and build only.
+Mosaica is deployed to **Cloudflare Workers** as a static-assets Worker. `wrangler.jsonc` tells Wrangler to upload the Vite build in `dist/` and serve it from the edge, with single-page fallback for unknown paths.
 
-The site is fully static, so the same `dist/` folder can be dropped onto any static host (Netlify, Vercel, S3, a plain web server).
+The repository is connected to Cloudflare (Workers & Pages → Create → Import a repository), so Cloudflare builds and deploys every push to `main` using these settings:
+
+| Setting | Value |
+| --- | --- |
+| Build command | `npm run build` |
+| Deploy command | `npx wrangler deploy` |
+
+Pull requests get a test-and-build check from `.github/workflows/ci.yml`.
+
+Deploying from your machine works too:
+
+```bash
+npx wrangler login     # once
+npm run deploy         # build + wrangler deploy
+npm run preview:cf     # serve the build locally through the Workers runtime
+```
+
+To serve from your own domain, add a `routes` entry with `custom_domain: true` to `wrangler.jsonc` (the zone must be on Cloudflare).
 
 ## Project layout
 

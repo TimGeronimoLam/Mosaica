@@ -1,0 +1,23 @@
+/**
+ * Cloudflare Workers configuration for Mosaica.
+ * The app is a static site, so this is an assets-only Worker: Wrangler uploads
+ * the Vite build in ./dist and Cloudflare serves it from the edge.
+ *
+ *   npm run deploy          build and deploy (needs `npx wrangler login` once, or CLOUDFLARE_API_TOKEN)
+ *   npm run preview:cf      serve the build locally the way Workers will
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mosaica",
+  "compatibility_date": "2026-10-30",
+  "assets": {
+    "directory": "./dist",
+    // Unknown paths fall back to index.html; the app uses hash routes so this only matters for typos.
+    "not_found_handling": "single-page-application"
+  },
+  "observability": {
+    "enabled": true
+  }
+  // To serve from your own domain (zone must be on Cloudflare), uncomment and edit:
+  // "routes": [{ "pattern": "mosaica.example.com", "custom_domain": true }]
+}
