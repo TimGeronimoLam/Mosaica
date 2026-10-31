@@ -1,4 +1,5 @@
 import type { MosaicSettings } from '../types';
+import { bufferToOklab } from './color';
 import { clamp01, cropRect, type SourceRaster } from './image';
 
 /** Cell colours (w*h*3, sRGB 0..1) plus which cells were removed as background. */
@@ -9,7 +10,7 @@ export interface Sampled {
 
 export type CleanupSettings = Pick<
   MosaicSettings,
-  'zoom' | 'cx' | 'cy' | 'brightness' | 'contrast' | 'saturation' | 'autoLevels' | 'localContrast' | 'smooth' | 'darkDetails' | 'outlines'
+  'crop' | 'zoom' | 'cx' | 'cy' | 'brightness' | 'contrast' | 'saturation' | 'autoLevels' | 'localContrast' | 'smooth' | 'darkDetails' | 'outlines' | 'cellColor'
 >;
 
 const lum = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -18,25 +19,54 @@ const lum = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.072
  * Turn the crop of the (transformed) photo into one colour per cell.
  *
  * Filters that look at neighbourhoods (even lighting, simplify, outlines, dark
- * details) need to see inside each cell, so the crop is first resampled at up
- * to 4x4 pixels per cell, filtered, and then reduced to cells. With all of
- * them off, each cell is a plain average of its source pixels.
+ * details, main colour) need to see inside each cell, so the crop is first
+ * resampled at up to 4x4 pixels per cell, filtered, and then reduced to cells.
+ * With all of them off, each cell is a plain average of its source pixels:
+ * exactly what mosaics made before these options got.
  *
  * `mask` (same size as the photo, 1 = background) marks cells to leave blank.
  */
 export function sampleGrid(src: SourceRaster, w: number, h: number, s: CleanupSettings, mask?: Uint8Array | null): Sampled {
   const rect = cropRect(src, w, h, s);
-  const detail = s.localContrast > 0 || s.smooth > 0 || s.darkDetails > 0 || s.outlines > 0;
+  const detail = s.localContrast > 0 || s.smooth > 0 || s.darkDetails > 0 || s.outlines > 0 || s.cellColor === 'main';
   const S = detail ? Math.max(1, Math.min(4, Math.floor(Math.min(rect.w / w, rect.h / h)))) : 1;
+  const { rgb, cover } = resampleArea(src, rect, w * S, h * S, mask ?? null);
+  return finish(rgb, cover, w, h, S, s);
+}
+
+/**
+ * Like sampleGrid, for a crop that has already been rendered at S x S pixels
+ * per cell (w*S x h*S) straight from the full-resolution photo. `mask` is the
+ * background mask at that same size.
+ */
+export function sampleCells(src: SourceRaster, w: number, h: number, S: number, s: CleanupSettings, mask?: Uint8Array | null): Sampled {
+  const n = w * S * h * S;
+  const rgb = new Float32Array(n * 3);
+  const { data } = src;
+  for (let i = 0; i < n; i++) {
+    const a = data[i * 4 + 3] / 255;
+    rgb[i * 3] = (data[i * 4] * a + 255 * (1 - a)) / 255;
+    rgb[i * 3 + 1] = (data[i * 4 + 1] * a + 255 * (1 - a)) / 255;
+    rgb[i * 3 + 2] = (data[i * 4 + 2] * a + 255 * (1 - a)) / 255;
+  }
+  let cover: Float32Array | null = null;
+  if (mask) {
+    cover = new Float32Array(n);
+    for (let i = 0; i < n; i++) cover[i] = mask[i];
+  }
+  return finish(rgb, cover, w, h, S, s);
+}
+
+/** Tone, filters, then reduce S x S blocks to cells. */
+function finish(rgb: Float32Array, cover: Float32Array | null, w: number, h: number, S: number, s: CleanupSettings): Sampled {
   const W = w * S;
   const H = h * S;
-  const { rgb, cover } = resampleArea(src, rect, W, H, mask ?? null);
   tone(rgb, cover, s);
   if (s.localContrast > 0) evenLighting(rgb, W, H, s.localContrast / 100, cover);
   if (s.smooth > 0) kuwahara(rgb, W, H, Math.max(1, Math.round((s.smooth / 100) * 1.5 * S)));
   if (s.outlines > 0) drawOutlines(rgb, W, H, s.outlines / 100, Math.max(1, Math.round(S / 2)));
   for (let i = 0; i < rgb.length; i++) rgb[i] = clamp01(rgb[i]);
-  const out = S === 1 ? rgb : downsample(rgb, W, H, S, s.darkDetails / 100);
+  const out = S === 1 ? rgb : downsample(rgb, W, H, S, s.darkDetails / 100, s.cellColor === 'main', cover);
   let removed: Uint8Array | null = null;
   if (cover) {
     removed = new Uint8Array(w * h);
@@ -74,23 +104,44 @@ function resampleArea(src: SourceRaster, rect: { x: number; y: number; w: number
       let b = 0;
       let m = 0;
       let n = 0;
+      // Colour of the kept (unmasked) pixels only, so cut-out edges carry no background colour.
+      let kr = 0;
+      let kg = 0;
+      let kb = 0;
       for (let y = y0; y < y1 && y < src.height; y++) {
         let i = (y * sw + x0) * 4;
         for (let x = x0; x < x1 && x < sw; x++) {
           const a = data[i + 3] / 255;
-          r += data[i] * a + 255 * (1 - a);
-          g += data[i + 1] * a + 255 * (1 - a);
-          b += data[i + 2] * a + 255 * (1 - a);
-          if (mask) m += mask[y * sw + x];
+          const pr = data[i] * a + 255 * (1 - a);
+          const pg = data[i + 1] * a + 255 * (1 - a);
+          const pb = data[i + 2] * a + 255 * (1 - a);
+          r += pr;
+          g += pg;
+          b += pb;
+          if (mask) {
+            if (mask[y * sw + x]) m++;
+            else {
+              kr += pr;
+              kg += pg;
+              kb += pb;
+            }
+          }
           n++;
           i += 4;
         }
       }
       if (n === 0) n = 1;
       const o = (gy * W + gx) * 3;
-      rgb[o] = r / n / 255;
-      rgb[o + 1] = g / n / 255;
-      rgb[o + 2] = b / n / 255;
+      const kept = n - m;
+      if (mask && m > 0 && kept > 0) {
+        rgb[o] = kr / kept / 255;
+        rgb[o + 1] = kg / kept / 255;
+        rgb[o + 2] = kb / kept / 255;
+      } else {
+        rgb[o] = r / n / 255;
+        rgb[o + 1] = g / n / 255;
+        rgb[o + 2] = b / n / 255;
+      }
       if (cover) cover[gy * W + gx] = m / n;
     }
   }
@@ -329,58 +380,140 @@ export function drawOutlines(rgb: Float32Array, W: number, H: number, k: number,
 }
 
 /**
- * Reduce S x S blocks to one cell. With `dark` > 0 the cell leans towards
- * the mean of its darkest quarter, so a thin dark line through a cell (an eye,
- * a mouth, a whisker) still darkens it instead of being averaged away.
+ * Reduce S x S blocks to one cell.
+ *
+ * Average (the classic way): the mean colour. With `dark` > 0 the cell leans
+ * towards the mean of its darkest quarter, so a thin dark line through a cell
+ * (an eye, a mouth, a whisker) still darkens it instead of being averaged away.
+ *
+ * Main colour (`main`): a cell that straddles an edge takes the colour of the
+ * larger side instead of a blend of both. Blends are colours that exist on
+ * neither side, so they add muddy in-between cells along every edge and use up
+ * palette colours. The samples are split into two groups in OKLab; if the
+ * groups are nearly the same colour the cell is just averaged, so smooth areas
+ * stay smooth. `dark` makes the darker side win close calls.
+ *
+ * Samples flagged in `cover` (removed background) are ignored unless the whole
+ * cell is removed.
  */
-export function downsample(rgb: Float32Array, W: number, H: number, S: number, dark: number): Float32Array {
+export function downsample(rgb: Float32Array, W: number, H: number, S: number, dark: number, main = false, cover: Float32Array | null = null): Float32Array {
   const w = W / S;
   const h = H / S;
   const out = new Float32Array(w * h * 3);
-  const count = S * S;
-  const keep = Math.max(1, Math.ceil(count / 4));
-  const ls = new Float32Array(count);
-  const idx = new Array<number>(count);
+  const lab = main ? bufferToOklab(rgb) : null;
+  const all = new Int32Array(S * S);
+  const assign = new Uint8Array(S * S);
   for (let gy = 0; gy < h; gy++) {
     for (let gx = 0; gx < w; gx++) {
-      let r = 0;
-      let g = 0;
-      let b = 0;
-      let k = 0;
+      let count = 0;
       for (let y = 0; y < S; y++) {
         for (let x = 0; x < S; x++) {
-          const o = ((gy * S + y) * W + gx * S + x) * 3;
-          r += rgb[o];
-          g += rgb[o + 1];
-          b += rgb[o + 2];
-          ls[k] = lum(rgb[o], rgb[o + 1], rgb[o + 2]);
-          idx[k] = o;
-          k++;
+          const p = (gy * S + y) * W + gx * S + x;
+          if (!cover || cover[p] < 0.5) all[count++] = p;
         }
       }
-      r /= count;
-      g /= count;
-      b /= count;
-      if (dark > 0) {
-        const order = idx.map((_, i) => i).sort((p, q) => ls[p] - ls[q]);
-        let dr = 0;
-        let dg = 0;
-        let db = 0;
-        for (let i = 0; i < keep; i++) {
-          const o = idx[order[i]];
-          dr += rgb[o];
-          dg += rgb[o + 1];
-          db += rgb[o + 2];
-        }
-        r += (dr / keep - r) * dark;
-        g += (dg / keep - g) * dark;
-        b += (db / keep - b) * dark;
+      if (count === 0) {
+        for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) all[count++] = (gy * S + y) * W + gx * S + x;
       }
+      const idx = all.subarray(0, count);
       const o = (gy * w + gx) * 3;
-      out[o] = r;
-      out[o + 1] = g;
-      out[o + 2] = b;
+      if (lab && count >= 3 && mainColour(rgb, lab, idx, assign, dark, out, o)) continue;
+      averageCell(rgb, idx, dark, out, o);
     }
   }
   return out;
+}
+
+function averageCell(rgb: Float32Array, idx: Int32Array, dark: number, out: Float32Array, o: number): void {
+  const count = idx.length;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  for (let k = 0; k < count; k++) {
+    const p = idx[k] * 3;
+    r += rgb[p];
+    g += rgb[p + 1];
+    b += rgb[p + 2];
+  }
+  r /= count;
+  g /= count;
+  b /= count;
+  if (dark > 0) {
+    const keep = Math.max(1, Math.ceil(count / 4));
+    const order = Array.from(idx).sort((p, q) => lum(rgb[p * 3], rgb[p * 3 + 1], rgb[p * 3 + 2]) - lum(rgb[q * 3], rgb[q * 3 + 1], rgb[q * 3 + 2]));
+    let dr = 0;
+    let dg = 0;
+    let db = 0;
+    for (let i = 0; i < keep; i++) {
+      const p = order[i] * 3;
+      dr += rgb[p];
+      dg += rgb[p + 1];
+      db += rgb[p + 2];
+    }
+    r += (dr / keep - r) * dark;
+    g += (dg / keep - g) * dark;
+    b += (db / keep - b) * dark;
+  }
+  out[o] = r;
+  out[o + 1] = g;
+  out[o + 2] = b;
+}
+
+/** Two-group split of a cell's samples; writes the bigger group's mean colour. False if the cell is uniform. */
+function mainColour(rgb: Float32Array, lab: Float32Array, idx: Int32Array, assign: Uint8Array, dark: number, out: Float32Array, o: number): boolean {
+  const count = idx.length;
+  // Start from the darkest and lightest samples.
+  let lo = idx[0];
+  let hi = idx[0];
+  for (let k = 1; k < count; k++) {
+    const p = idx[k];
+    if (lab[p * 3] < lab[lo * 3]) lo = p;
+    if (lab[p * 3] > lab[hi * 3]) hi = p;
+  }
+  const c = [lab[lo * 3], lab[lo * 3 + 1], lab[lo * 3 + 2], lab[hi * 3], lab[hi * 3 + 1], lab[hi * 3 + 2]];
+  const d2 = () => (c[0] - c[3]) ** 2 + (c[1] - c[4]) ** 2 + (c[2] - c[5]) ** 2;
+  // OKLab distance under ~0.07 reads as "the same colour, a little textured".
+  const SAME = 0.07 * 0.07;
+  if (d2() < SAME) return false;
+  let n0 = 0;
+  for (let it = 0; it < 5; it++) {
+    const sum = [0, 0, 0, 0, 0, 0];
+    n0 = 0;
+    for (let k = 0; k < count; k++) {
+      const p = idx[k] * 3;
+      const e0 = (lab[p] - c[0]) ** 2 + (lab[p + 1] - c[1]) ** 2 + (lab[p + 2] - c[2]) ** 2;
+      const e1 = (lab[p] - c[3]) ** 2 + (lab[p + 1] - c[4]) ** 2 + (lab[p + 2] - c[5]) ** 2;
+      const g = e0 <= e1 ? 0 : 1;
+      assign[k] = g;
+      if (!g) n0++;
+      sum[g * 3] += lab[p];
+      sum[g * 3 + 1] += lab[p + 1];
+      sum[g * 3 + 2] += lab[p + 2];
+    }
+    const n1 = count - n0;
+    if (!n0 || !n1) return false;
+    for (let j = 0; j < 3; j++) {
+      c[j] = sum[j] / n0;
+      c[3 + j] = sum[3 + j] / n1;
+    }
+  }
+  if (d2() < SAME) return false;
+  // Group 0 started from the darkest sample, so it is the darker side.
+  const pick = n0 * (1 + 2 * dark) >= count - n0 ? 0 : 1;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let m = 0;
+  for (let k = 0; k < count; k++) {
+    if (assign[k] !== pick) continue;
+    const p = idx[k] * 3;
+    r += rgb[p];
+    g += rgb[p + 1];
+    b += rgb[p + 2];
+    m++;
+  }
+  out[o] = r / m;
+  out[o + 1] = g / m;
+  out[o + 2] = b / m;
+  return true;
 }

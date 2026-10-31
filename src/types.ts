@@ -1,3 +1,4 @@
+import type { CropBox, CropRatio } from './lib/crop';
 import type { CellEdits } from './lib/edits';
 import type { StoredMask } from './lib/mask';
 
@@ -16,6 +17,9 @@ export type ModeId =
 export type PixelKind = 'binary' | 'palette' | 'mystery';
 
 export type LabelStyle = 'number' | 'sums';
+/** How a cell's colour is taken from the photo pixels it covers. */
+export type CellColor = 'average' | 'main';
+export type DitherStyle = 'pattern' | 'diffusion';
 export type SumOps = 'add' | 'addsub' | 'mul' | 'mixed';
 export type Difficulty = 'easy' | 'normal';
 
@@ -28,7 +32,14 @@ export interface MosaicSettings {
   flipH: boolean;
   flipV: boolean;
   straighten: number;
-  /** Crop: zoom factor (1 = whole image, cover-fit) and centre point in 0..1 of the transformed photo. */
+  /**
+   * The crop, as fractions of the transformed photo. Missing in mosaics made
+   * before free cropping, which use the zoom/centre framing below.
+   */
+  crop?: CropBox;
+  /** Shape the crop frame keeps while you resize it. */
+  cropRatio: CropRatio;
+  /** Older framing: zoom factor (1 = whole image, cover-fit) and centre point in 0..1. */
   zoom: number;
   cx: number;
   cy: number;
@@ -50,8 +61,22 @@ export interface MosaicSettings {
   threshold: number;
   invert: boolean;
   dither: boolean;
-  /** 0..3 passes of speckle removal. */
+  /** 0..3 passes of speckle removal (the older clean-up; new mosaics use minRegion). */
   despeckle: number;
+  /**
+   * Which converter turns the photo into cells. 1: the original (sRGB colours,
+   * crop sampled from a 1024px copy). 2: renders the crop from the
+   * full-resolution photo and matches colours in OKLab. Older mosaics stay on 1
+   * so they regenerate exactly as saved.
+   */
+  converter: number;
+  /** Average the pixels of a cell, or take the main colour so edges stay crisp. */
+  cellColor: CellColor;
+  /** Merge areas smaller than this many cells into their neighbours (0 = off). */
+  minRegion: number;
+  /** Dithering pattern when dither is on, and its strength 0..100. */
+  ditherStyle: DitherStyle;
+  ditherAmount: number;
   /** Palette modes. */
   colors: number;
   blankLightest: boolean;

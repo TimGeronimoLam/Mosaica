@@ -1328,6 +1328,98 @@ input[type='range']:focus-visible::-moz-range-thumb {
   color: var(--accent-hover);
 }
 
+.field.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  flex: 1;
+}
+
+.field.inline select {
+  flex: 1;
+  min-width: 0;
+}
+
+.stage-tools .field.inline {
+  flex: 0 1 auto;
+}
+
+.stage-tools .field.inline select {
+  width: 170px;
+  height: 34px;
+}
+
+.field .hint {
+  font-weight: 400;
+  margin: 0;
+}
+
+.panel-row.tight {
+  margin-top: -4px;
+}
+
+.alert.compact {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  font-size: 0.84rem;
+}
+
+.crop-frame.active {
+  outline: 1px solid rgba(29, 34, 48, 0.55);
+}
+
+.cell-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.cell-lines line {
+  stroke: rgba(255, 255, 255, 0.55);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.crop-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  background: #fff;
+  border: 2px solid var(--accent);
+  border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(29, 34, 48, 0.35);
+  pointer-events: none;
+}
+
+.crop-handle.edge {
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+}
+
+@media (pointer: coarse) {
+  .crop-handle {
+    width: 20px;
+    height: 20px;
+    margin: -10px 0 0 -10px;
+  }
+
+  .crop-handle.edge {
+    width: 16px;
+    height: 16px;
+    margin: -8px 0 0 -8px;
+  }
+}
+
 .cleanup-status {
   margin-top: 12px;
   padding: 6px 12px;

@@ -83,7 +83,7 @@ export const MODES: ModeDef[] = [
     settings: ['threshold', 'dither'],
     defaultWidth: 30,
     maxWidth: 60,
-    defaults: { dither: true, despeckle: 0, threshold: 60 },
+    defaults: { dither: true, ditherAmount: 100, threshold: 60 },
     generate: (g) => generateMystery(g),
   },
   {
@@ -149,6 +149,7 @@ export function defaultSettings(mode: ModeId, seed: number): MosaicSettings {
     flipH: false,
     flipV: false,
     straighten: 0,
+    cropRatio: 'free',
     zoom: 1,
     cx: 0.5,
     cy: 0.5,
@@ -163,7 +164,12 @@ export function defaultSettings(mode: ModeId, seed: number): MosaicSettings {
     threshold: 50,
     invert: false,
     dither: false,
-    despeckle: 1,
+    despeckle: 0,
+    converter: 2,
+    cellColor: 'main',
+    minRegion: 3,
+    ditherStyle: 'pattern',
+    ditherAmount: 50,
     colors: 8,
     blankLightest: true,
     labelStyle: 'number',
@@ -201,4 +207,23 @@ export function normalizeSettings(mode: ModeId, s: MosaicSettings): MosaicSettin
 
 export function generatePuzzle(mode: ModeId, grid: PixelGrid, s: MosaicSettings): Puzzle {
   return MODE_BY_ID[mode].generate(grid, s);
+}
+
+/**
+ * Values for settings that mosaics saved before they existed must get, so
+ * reopening one regenerates the same puzzle. Applied under the saved settings.
+ */
+export const LEGACY_SETTINGS: Partial<MosaicSettings> = {
+  converter: 1,
+  cellColor: 'average',
+  minRegion: 0,
+  ditherStyle: 'diffusion',
+  ditherAmount: 100,
+  despeckle: 1,
+};
+
+/** Settings of a saved mosaic, with anything it predates filled in the way it was made. */
+export function loadSettings(mode: ModeId, saved: MosaicSettings): MosaicSettings {
+  const legacy = saved.converter === undefined ? LEGACY_SETTINGS : {};
+  return { ...defaultSettings(mode, saved.seed), ...legacy, ...saved };
 }

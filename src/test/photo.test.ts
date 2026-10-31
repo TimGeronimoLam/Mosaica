@@ -6,7 +6,7 @@ import { downsample, evenLighting, kuwahara, sampleGrid } from '../lib/preproces
 import { applyEdits, floodCells, remapEdits, resolveToken, setCells, tokenForValue } from '../lib/edits';
 import { initHistory, pushHistory, redoHistory, undoHistory } from '../lib/history';
 import { pixelize } from '../lib/pixelize';
-import { defaultSettings } from '../lib/modes';
+import { defaultSettings, loadSettings } from '../lib/modes';
 import type { SourceRaster } from '../lib/image';
 
 const T0: PhotoTransform = { rotate: 0, flipH: false, flipV: false, straighten: 0 };
@@ -159,7 +159,7 @@ describe('background mask', () => {
 describe('photo clean-up', () => {
   it('samples exactly like a plain average when every filter is off', () => {
     const src = raster(8, 8, (x, y) => [x * 30, y * 30, 100]);
-    const { rgb, removed } = sampleGrid(src, 2, 2, settings());
+    const { rgb, removed } = sampleGrid(src, 2, 2, settings({ cellColor: 'average' }));
     expect(removed).toBeNull();
     // Top-left cell averages x, y in 0..3.
     expect(rgb[0]).toBeCloseTo((1.5 * 30) / 255, 5);
@@ -294,7 +294,11 @@ describe('compatibility', () => {
     const rng = createRng(42);
     const src = raster(173, 121, () => [rng.int(256), rng.int(256), rng.int(256)]);
     for (const patch of [{}, { brightness: 30, contrast: -40, saturation: 60 }, { zoom: 2.3, cx: 0.3, cy: 0.7, contrast: 80 }, { gridWidth: 41, gridHeight: 17 }]) {
-      const s = settings(patch);
+      // What a mosaic saved before the newer options loads with.
+      const saved: Partial<MosaicSettings> = { ...settings({ ...patch, despeckle: 1 }) };
+      for (const key of ['converter', 'cellColor', 'minRegion', 'ditherStyle', 'ditherAmount', 'cropRatio'] as const) delete saved[key];
+      const s = loadSettings('colorByCode', saved as MosaicSettings);
+      expect(s.cellColor).toBe('average');
       const w = s.gridWidth;
       const h = s.gridHeight;
       const before = legacySampleGrid(src, w, h, s);

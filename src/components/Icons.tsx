@@ -257,6 +257,13 @@ export const IconMove = (p: IconProps) => (
   </Svg>
 );
 
+export const IconCrop = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+    <path d="M18 22V8a2 2 0 0 0-2-2H2" />
+  </Svg>
+);
+
 export const IconBrush = (p: IconProps) => (
   <Svg {...p}>
     <path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08" />

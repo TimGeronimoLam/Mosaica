@@ -1,3 +1,5 @@
+import { flipBox, rotateBox, type CropBox } from './crop';
+
 /**
  * Geometry of the photo transform: quarter turns, mirroring and a fine
  * "straighten" rotation. Everything is a 2D affine map in canvas order
@@ -118,16 +120,20 @@ export function transformedAspect(w: number, h: number, t: Pick<PhotoTransform, 
  * rotate-then-flip order, and mirroring flips the straighten angle. The crop
  * centre follows the picture.
  */
-export function rotateView<T extends PhotoTransform & { cx: number; cy: number }>(s: T, dir: 1 | -1): Partial<T> {
+type Framed = PhotoTransform & { cx: number; cy: number; crop?: CropBox };
+
+export function rotateView<T extends Framed>(s: T, dir: 1 | -1): Partial<T> {
   const mirrored = s.flipH !== s.flipV;
   return {
     rotate: (quarterTurns(s) + (mirrored ? -dir : dir) + 4) % 4,
     cx: dir === 1 ? 1 - s.cy : s.cy,
     cy: dir === 1 ? s.cx : 1 - s.cx,
+    ...(s.crop ? { crop: rotateBox(s.crop, dir) } : {}),
   } as Partial<T>;
 }
 
-export function flipView<T extends PhotoTransform & { cx: number; cy: number }>(s: T, axis: 'h' | 'v'): Partial<T> {
+export function flipView<T extends Framed>(s: T, axis: 'h' | 'v'): Partial<T> {
   const straighten = s.straighten ? -s.straighten : 0;
-  return (axis === 'h' ? { flipH: !s.flipH, cx: 1 - s.cx, straighten } : { flipV: !s.flipV, cy: 1 - s.cy, straighten }) as Partial<T>;
+  const crop = s.crop ? { crop: flipBox(s.crop, axis) } : {};
+  return (axis === 'h' ? { flipH: !s.flipH, cx: 1 - s.cx, straighten, ...crop } : { flipV: !s.flipV, cy: 1 - s.cy, straighten, ...crop }) as Partial<T>;
 }

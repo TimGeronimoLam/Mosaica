@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { CROP_RATIOS, dragHandle, moveBox, scaleBox, spanBox, type CropBox, type CropRatio, type Handle } from '../lib/crop';
 import type { CropRect, SourceRaster, TransformedPhoto } from '../lib/image';
 import { combineMask, emptyMask, invertMask, maskCoverage, normalizeMask, paintSegment, renderMaskOverlay, selectBackground, selectSimilar, type Box, type PhotoMask } from '../lib/mask';
 import { apply, invert, multiply, scaleOf, scaling, type Affine } from '../lib/transform';
-import { IconBrush, IconInvert, IconMove, IconSparkles, IconTrash, IconWand } from './Icons';
+import { IconBrush, IconCrop, IconInvert, IconSparkles, IconTrash, IconWand } from './Icons';
 import { capture, Segmented, Slider } from './ui';
 
 export interface PhotoTools {
-  tool: 'move' | 'brush' | 'wand';
+  tool: 'crop' | 'brush' | 'wand';
   /** Brush and wand remove background (true) or bring it back (false). */
   erase: boolean;
   /** Brush radius in grid cells. */
@@ -15,7 +16,7 @@ export interface PhotoTools {
   tolerance: number;
 }
 
-export const DEFAULT_PHOTO_TOOLS: PhotoTools = { tool: 'move', erase: true, brush: 1.5, tolerance: 30 };
+export const DEFAULT_PHOTO_TOOLS: PhotoTools = { tool: 'crop', erase: true, brush: 1.5, tolerance: 30 };
 
 /** Maps pixels of the transformed photo to pixels of a mask of the given size. */
 export function photoToMask(photo: TransformedPhoto, maskWidth: number, maskHeight: number): Affine {
@@ -69,28 +70,55 @@ interface StageProps {
   mask: PhotoMask | null;
   /** The untransformed photo at mask resolution, for the wand. */
   maskBase: SourceRaster;
-  crop: CropRect;
+  /** The crop, as fractions of the photo. */
+  box: CropBox;
+  /** Width / height the crop keeps while it is dragged, or null for a free crop. */
+  ratio: number | null;
+  gridWidth: number;
+  gridHeight: number;
   /** Size of one grid cell in photo pixels. */
   cellSize: number;
-  zoom: number;
   displayWidth: number;
   tools: PhotoTools;
-  onCrop: (patch: { cx?: number; cy?: number; zoom?: number }) => void;
+  onCrop: (box: CropBox) => void;
   onMask: (m: PhotoMask | null) => void;
 }
 
+type CropHit = Handle | 'move' | 'new';
+
 type Gesture =
-  | { kind: 'move'; x: number; y: number; cx: number; cy: number }
-  | { kind: 'pinch'; dist: number; zoom: number }
+  | { kind: 'crop'; hit: CropHit; start: CropBox; x: number; y: number; moved: boolean }
+  | { kind: 'pinch'; dist: number; start: CropBox }
   | { kind: 'brush'; data: Uint8Array; last: [number, number] };
 
-export function PhotoStage({ photo, mask, maskBase, crop, cellSize, zoom, displayWidth, tools, onCrop, onMask }: StageProps) {
+const CORNERS: Handle[] = ['nw', 'ne', 'sw', 'se'];
+const EDGES: Handle[] = ['n', 's', 'e', 'w'];
+const CURSORS: Record<CropHit, string> = {
+  nw: 'nwse-resize',
+  se: 'nwse-resize',
+  ne: 'nesw-resize',
+  sw: 'nesw-resize',
+  n: 'ns-resize',
+  s: 'ns-resize',
+  e: 'ew-resize',
+  w: 'ew-resize',
+  move: 'move',
+  new: 'crosshair',
+};
+
+/** Where a handle sits on the crop, as fractions of the crop's width and height. */
+function handleAt(h: Handle): [number, number] {
+  return [h.includes('w') ? 0 : h.includes('e') ? 1 : 0.5, h.includes('n') ? 0 : h.includes('s') ? 1 : 0.5];
+}
+
+export function PhotoStage({ photo, mask, maskBase, box, ratio, gridWidth, gridHeight, cellSize, displayWidth, tools, onCrop, onMask }: StageProps) {
   const stage = useRef<HTMLDivElement>(null);
   const imgCanvas = useRef<HTMLCanvasElement>(null);
   const ovCanvas = useRef<HTMLCanvasElement>(null);
   const pointers = useRef(new Map<number, [number, number]>());
   const gesture = useRef<Gesture | null>(null);
   const [hover, setHover] = useState<[number, number] | null>(null);
+  const [hoverHit, setHoverHit] = useState<CropHit>('new');
   const [dragging, setDragging] = useState(false);
   const { width: W, height: H } = photo.raster;
   const mw = maskBase.width;
@@ -99,6 +127,8 @@ export function PhotoStage({ photo, mask, maskBase, crop, cellSize, zoom, displa
   const toPhoto = invert(toMask);
   const scale = displayWidth / W;
   const brushPx = Math.max(1, tools.brush * cellSize);
+  const A = W / H;
+  const displayHeight = displayWidth * (H / W);
 
   useLayoutEffect(() => {
     imgCanvas.current?.getContext('2d')?.drawImage(photo.canvas, 0, 0);
@@ -108,20 +138,39 @@ export function PhotoStage({ photo, mask, maskBase, crop, cellSize, zoom, displa
     if (ovCanvas.current) paintOverlay(ovCanvas.current, mask, photoToMask(photo, mw, mh));
   }, [photo, mask, mw, mh]);
 
-  // Ctrl/⌘ + wheel (and trackpad pinch, which arrives as ctrl+wheel) zooms the crop.
-  const zoomRef = useRef(zoom);
-  zoomRef.current = zoom;
+  // Ctrl/⌘ + wheel (and trackpad pinch, which arrives as ctrl+wheel) resizes the crop around its centre.
+  const boxRef = useRef(box);
+  boxRef.current = box;
   useEffect(() => {
     const el = stage.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
-      onCrop({ zoom: clampZoom(zoomRef.current * Math.exp(-e.deltaY * 0.01)) });
+      onCrop(scaleBox(boxRef.current, Math.exp(e.deltaY * 0.01), A));
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [onCrop]);
+  }, [onCrop, A]);
+
+  /** What a pointer at display position (px, py) would grab on the crop frame. */
+  const hitTest = (px: number, py: number, touch: boolean): CropHit => {
+    const r = touch ? 22 : 10;
+    const bx = box.x * displayWidth;
+    const by = box.y * displayHeight;
+    const bw = box.w * displayWidth;
+    const bh = box.h * displayHeight;
+    for (const h of ratio === null ? [...CORNERS, ...EDGES] : CORNERS) {
+      const [fx, fy] = handleAt(h);
+      if (Math.abs(px - (bx + fx * bw)) <= r && Math.abs(py - (by + fy * bh)) <= r) return h;
+    }
+    return px >= bx && px <= bx + bw && py >= by && py <= by + bh ? 'move' : 'new';
+  };
+
+  const local = (e: { clientX: number; clientY: number }): [number, number] => {
+    const r = stage.current!.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  };
 
   const toImage = (e: { clientX: number; clientY: number }): [number, number] => {
     const r = stage.current!.getBoundingClientRect();
@@ -159,12 +208,13 @@ export function PhotoStage({ photo, mask, maskBase, crop, cellSize, zoom, displa
     capture(stage.current, e.pointerId);
     const p = toImage(e);
     pointers.current.set(e.pointerId, [e.clientX, e.clientY]);
-    if (tools.tool === 'move') {
+    if (tools.tool === 'crop') {
       if (pointers.current.size === 2) {
         const [a, b] = [...pointers.current.values()];
-        gesture.current = { kind: 'pinch', dist: Math.hypot(a[0] - b[0], a[1] - b[1]), zoom };
+        gesture.current = { kind: 'pinch', dist: Math.hypot(a[0] - b[0], a[1] - b[1]), start: box };
       } else {
-        gesture.current = { kind: 'move', x: e.clientX, y: e.clientY, cx: (crop.x + crop.w / 2) / W, cy: (crop.y + crop.h / 2) / H };
+        const [lx, ly] = local(e);
+        gesture.current = { kind: 'crop', hit: hitTest(lx, ly, e.pointerType !== 'mouse'), start: box, x: lx / displayWidth, y: ly / displayHeight, moved: false };
       }
       setDragging(true);
       return;
@@ -184,6 +234,10 @@ export function PhotoStage({ photo, mask, maskBase, crop, cellSize, zoom, displa
   const onPointerMove = (e: ReactPointerEvent) => {
     const p = toImage(e);
     setHover(p);
+    if (tools.tool === 'crop' && !gesture.current) {
+      const [lx, ly] = local(e);
+      setHoverHit(hitTest(lx, ly, e.pointerType !== 'mouse'));
+    }
     if (!pointers.current.has(e.pointerId)) return;
     pointers.current.set(e.pointerId, [e.clientX, e.clientY]);
     const g = gesture.current;
@@ -191,13 +245,18 @@ export function PhotoStage({ photo, mask, maskBase, crop, cellSize, zoom, displa
     if (g.kind === 'brush') strokeTo(g, p);
     else if (g.kind === 'pinch' && pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()];
-      onCrop({ zoom: clampZoom((g.zoom * Math.hypot(a[0] - b[0], a[1] - b[1])) / Math.max(1, g.dist)) });
-    } else if (g.kind === 'move') {
-      const dx = (e.clientX - g.x) / displayWidth;
-      const dy = (e.clientY - g.y) / (displayWidth * (H / W));
-      const hx = crop.w / W / 2;
-      const hy = crop.h / H / 2;
-      onCrop({ cx: clamp(g.cx + dx, hx, 1 - hx), cy: clamp(g.cy + dy, hy, 1 - hy) });
+      // Fingers apart = zoom in = a smaller crop.
+      onCrop(scaleBox(g.start, Math.max(1, g.dist) / Math.max(1, Math.hypot(a[0] - b[0], a[1] - b[1])), A));
+    } else if (g.kind === 'crop') {
+      const [lx, ly] = local(e);
+      const fx = lx / displayWidth;
+      const fy = ly / displayHeight;
+      // Ignore the jitter of a plain click.
+      if (!g.moved && Math.hypot((fx - g.x) * displayWidth, (fy - g.y) * displayHeight) < 4) return;
+      g.moved = true;
+      if (g.hit === 'move') onCrop(moveBox(g.start, fx - g.x, fy - g.y));
+      else if (g.hit === 'new') onCrop(spanBox(g.x, g.y, fx, fy, A, ratio));
+      else onCrop(dragHandle(g.start, g.hit, fx, fy, A, ratio));
     }
   };
 
@@ -211,13 +270,18 @@ export function PhotoStage({ photo, mask, maskBase, crop, cellSize, zoom, displa
     setDragging(false);
     // Lifting one finger of a pinch carries on as a move with the other.
     if (g?.kind === 'pinch' && pointers.current.size === 1) {
-      const [x, y] = [...pointers.current.values()][0];
-      gesture.current = { kind: 'move', x, y, cx: (crop.x + crop.w / 2) / W, cy: (crop.y + crop.h / 2) / H };
+      const [cx, cy] = [...pointers.current.values()][0];
+      const [lx, ly] = local({ clientX: cx, clientY: cy });
+      gesture.current = { kind: 'crop', hit: 'move', start: boxRef.current, x: lx / displayWidth, y: ly / displayHeight, moved: true };
       setDragging(true);
     }
   };
 
-  const cursor = tools.tool === 'move' ? (dragging ? 'grabbing' : 'grab') : tools.tool === 'wand' ? 'crosshair' : 'none';
+  const active = gesture.current?.kind === 'crop' ? gesture.current.hit : hoverHit;
+  const cursor = tools.tool === 'crop' ? CURSORS[dragging ? active : hoverHit] : tools.tool === 'wand' ? 'crosshair' : 'none';
+  // Cell lines inside the frame: every cell when cells are big enough to see, else every fifth.
+  const cellPx = (box.w * displayWidth) / gridWidth;
+  const every = cellPx >= 7 ? 1 : cellPx >= 2 ? 5 : 0;
   return (
     <div
       ref={stage}
@@ -231,7 +295,26 @@ export function PhotoStage({ photo, mask, maskBase, crop, cellSize, zoom, displa
     >
       <canvas ref={imgCanvas} width={W} height={H} />
       <canvas ref={ovCanvas} width={W} height={H} className="mask-layer" />
-      <div className={`crop-frame ${tools.tool === 'move' ? '' : 'faint'}`} style={cropStyle(crop, W, H)} />
+      <div
+        className={`crop-frame ${tools.tool === 'crop' ? 'active' : 'faint'}`}
+        style={{ left: box.x * displayWidth, top: box.y * displayHeight, width: box.w * displayWidth, height: box.h * displayHeight }}
+      >
+        {tools.tool === 'crop' && every > 0 && (
+          <svg className="cell-lines" viewBox={`0 0 ${gridWidth} ${gridHeight}`} preserveAspectRatio="none" aria-hidden="true">
+            {Array.from({ length: Math.floor((gridWidth - 1) / every) }, (_, i) => (
+              <line key={`x${i}`} x1={(i + 1) * every} x2={(i + 1) * every} y1={0} y2={gridHeight} />
+            ))}
+            {Array.from({ length: Math.floor((gridHeight - 1) / every) }, (_, i) => (
+              <line key={`y${i}`} y1={(i + 1) * every} y2={(i + 1) * every} x1={0} x2={gridWidth} />
+            ))}
+          </svg>
+        )}
+        {tools.tool === 'crop' &&
+          (ratio === null ? [...CORNERS, ...EDGES] : CORNERS).map((h) => {
+            const [fx, fy] = handleAt(h);
+            return <span key={h} className={`crop-handle ${h.length === 2 ? 'corner' : 'edge'}`} style={{ left: `${fx * 100}%`, top: `${fy * 100}%` }} />;
+          })}
+      </div>
       {hover && tools.tool === 'brush' && (
         <div
           className={`brush-cursor ${tools.erase ? 'erase' : 'keep'}`}
@@ -242,25 +325,20 @@ export function PhotoStage({ photo, mask, maskBase, crop, cellSize, zoom, displa
   );
 }
 
-function clamp(v: number, lo: number, hi: number): number {
-  return lo > hi ? 0.5 : Math.max(lo, Math.min(hi, v));
-}
-
-function clampZoom(z: number): number {
-  return Math.round(Math.max(1, Math.min(4, z)) * 100) / 100;
-}
-
 interface ToolbarProps {
   tools: PhotoTools;
   onTools: (patch: Partial<PhotoTools>) => void;
   mask: PhotoMask | null;
   maskBase: SourceRaster;
-  zoom: number;
-  onZoom: (z: number) => void;
+  cropRatio: CropRatio;
+  /** False when the grid size is fixed by hand, so the crop has to keep the grid's shape. */
+  ratioFree: boolean;
+  onRatio: (r: CropRatio) => void;
+  onResetCrop: () => void;
   onMask: (m: PhotoMask | null) => void;
 }
 
-export function PhotoToolbar({ tools, onTools, mask, maskBase, zoom, onZoom, onMask }: ToolbarProps) {
+export function PhotoToolbar({ tools, onTools, mask, maskBase, cropRatio, ratioFree, onRatio, onResetCrop, onMask }: ToolbarProps) {
   const mw = maskBase.width;
   const mh = maskBase.height;
   const removed = maskCoverage(mask);
@@ -281,8 +359,10 @@ export function PhotoToolbar({ tools, onTools, mask, maskBase, zoom, onZoom, onM
     );
   };
   const hint =
-    tools.tool === 'move'
-      ? 'Drag the frame to choose what goes in the puzzle. Pinch or Ctrl+scroll to zoom.'
+    tools.tool === 'crop'
+      ? ratioFree
+        ? 'Drag the corners or edges to crop, drag inside to move, or drag outside to draw a new crop. Pinch or Ctrl+scroll to resize.'
+        : 'The crop keeps the grid’s shape because the grid height is set by hand (step 3). Drag the corners to resize, drag inside to move.'
       : tools.tool === 'brush'
         ? tools.erase
           ? 'Paint over anything that should stay blank, like a busy background.'
@@ -298,12 +378,12 @@ export function PhotoToolbar({ tools, onTools, mask, maskBase, zoom, onZoom, onM
           value={tools.tool}
           onChange={(tool) => onTools({ tool })}
           options={[
-            { value: 'move', label: 'Frame', icon: <IconMove size={16} /> },
+            { value: 'crop', label: 'Crop', icon: <IconCrop size={16} /> },
             { value: 'brush', label: 'Brush', icon: <IconBrush size={16} /> },
             { value: 'wand', label: 'Wand', icon: <IconWand size={16} /> },
           ]}
         />
-        {tools.tool !== 'move' && (
+        {tools.tool !== 'crop' && (
           <Segmented
             label="Brush mode"
             value={tools.erase ? 'erase' : 'keep'}
@@ -314,8 +394,25 @@ export function PhotoToolbar({ tools, onTools, mask, maskBase, zoom, onZoom, onM
             ]}
           />
         )}
+        {tools.tool === 'crop' && (
+          <>
+            <label className="field inline">
+              <span>Shape</span>
+              <select value={ratioFree ? cropRatio : 'grid'} disabled={!ratioFree} onChange={(e) => onRatio(e.target.value as CropRatio)}>
+                {!ratioFree && <option value="grid">Same as the grid</option>}
+                {CROP_RATIOS.map((r) => (
+                  <option key={r.value} value={r.value}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button className="btn small ghost" onClick={onResetCrop}>
+              Reset crop
+            </button>
+          </>
+        )}
         <div className="tool-slider">
-          {tools.tool === 'move' && <Slider label="Zoom" value={zoom} min={1} max={4} step={0.05} onChange={onZoom} format={(v) => `${v.toFixed(2)}×`} />}
           {tools.tool === 'brush' && <Slider label="Brush size" value={tools.brush} min={0.5} max={8} step={0.5} onChange={(brush) => onTools({ brush })} format={(v) => `${v} cells`} />}
         </div>
       </div>

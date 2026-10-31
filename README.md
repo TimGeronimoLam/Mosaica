@@ -18,7 +18,8 @@ Turn any image into a printable picture puzzle. Mosaica runs entirely in the bro
 ## Features
 
 - Image to pixel art pipeline with crop/zoom, brightness, contrast, saturation, threshold, colour count, dithering, speckle removal and invert.
-- Photo tools for real-world pictures: rotate, mirror and straighten; drag the crop frame; remove the background; clean up lighting and texture; touch up single cells (see below).
+- Photo tools for real-world pictures: rotate, mirror and straighten; crop to any shape; remove the background; clean up lighting and texture; touch up single cells (see below).
+- A careful photo-to-cells converter: renders the crop from the full-resolution photo, keeps edges crisp, chooses palettes by how colours look, and cleans up specks (see below).
 - Undo and redo for every change (Ctrl+Z, Ctrl+Shift+Z).
 - Live preview of the photo, the pixel art, the puzzle and its solution while you adjust settings.
 - Save mosaics in the browser (IndexedDB) and manage them in a gallery: open, duplicate, delete, export and import as JSON.
@@ -29,7 +30,13 @@ Turn any image into a printable picture puzzle. Mosaica runs entirely in the bro
 
 Photos are harder than drawings: backgrounds are busy, light falls unevenly and fine details vanish when a whole patch of picture becomes one cell. The editor works through this in four places:
 
-1. **Frame it** (sidebar step 1, and the *Photo* view). Rotate in quarter turns, mirror, or straighten up to ±45° (the picture zooms just enough to hide the corners). In the Photo view, drag the frame to move it, and pinch or Ctrl+scroll to zoom. Tighter crops give each feature more cells: for a portrait, frame the face, not the whole person.
+1. **Frame it** (sidebar step 1, and the *Photo* view). Rotate in quarter turns, mirror, or straighten up to ±45° (the picture zooms just enough to hide the corners). With the *Crop* tool you can:
+   - drag the corners or edges to crop to any shape
+   - drag inside the crop to move it
+   - drag outside it to draw a new one
+   - pinch or Ctrl+scroll to resize it around its centre
+
+   Pick a fixed shape (square, 4:3, 16:9, …) from *Shape*. The grid takes the crop's shape. To fix both grid sides by hand instead, turn off *Height follows the crop* in step 3, and the crop keeps the grid's shape. Faint lines inside the crop show the cells. Tighter crops give each feature more cells: for a portrait, crop to the face, not the whole person.
 2. **Remove the background** (Photo view). *Remove background* floods inwards from the top and sides of the picture through areas of similar colour, so it works best on plain backdrops. It leaves the bottom edge alone, because that is usually where the subject is. The *Wand* removes one connected area of a similar colour, and the *Brush* paints by hand. Switch either to *Keep* to bring parts back, and use *Invert* to keep only what you painted. Removed areas print as blank paper and are left out of the colour palette, so all the colours go to the subject.
 3. **Clean it up** (sidebar step 5). *Auto-fix photo* applies a good starting mix:
    - *Auto levels* stretches the crop to full black and white.
@@ -38,6 +45,20 @@ Photos are harder than drawings: backgrounds are busy, light falls unevenly and 
    - *Keep dark details* stops eyes and thin lines from being averaged away.
    - *Outline edges* darkens strong edges, which helps nonograms and connect-the-dots.
 4. **Touch up the cells** (*Pixels* view). Paint with the pencil, flood-fill an area, pick a colour from the grid, or brush cells back to the automatic result. *Photo underneath* shows where things really are. Touch-ups are stored by colour, not by palette number, so they survive changes to other settings, and they are rescaled if you change the grid size.
+
+### How a photo becomes cells
+
+Each step below fixes a specific weakness of the simple approach of averaging each cell's pixels and running k-means in RGB. They were chosen by comparing the output on real photos (a portrait, a cat, a coffee cup) in colour-by-code and nonogram puzzles:
+
+- **Full-resolution crop.** The crop is rendered from the original photo (kept at up to 2400px) at up to 6×6 samples per cell, not cut out of a small working copy. Tight crops keep their detail.
+- **Main colour per cell** (*Each cell takes*, step 3). A cell on an edge takes the colour of the larger side, instead of a blend that exists on neither side. Blends add a muddy halo along every edge and waste palette colours. Cells of one colour stay averaged, so smooth areas stay smooth.
+- **Palettes chosen by how colours look.** k-means runs in OKLab, a perceptual colour space, with hue and saturation counting double, and keeps the best of six starts. This keeps skin apart from a grey wall and an orange crema apart from beige foam, and *Shuffle* gives variations rather than worse palettes.
+- **Merge small areas** (step 4). Islands smaller than *N* cells (3 by default) join the neighbouring area they share most border with, preferring similar colours. This is the usual paint-by-numbers clean-up: one-cell specks are photo noise and tedious to colour. It is skipped while shading is on, because dither dots are one-cell areas on purpose.
+- **Shading** (step 4): *Pattern* (ordered 4×4 dithering) gives regular textures that are easy to colour, and *Speckle* is classic error diffusion. Both have a strength slider; 50% is usually plenty.
+- **Auto threshold** (step 4, one-colour modes) picks the cut between dark and light with Otsu's method. It is a suggestion: it suits some photos and not others.
+- Cut-out edges take their colour only from the kept part of the cell, so no background colour bleeds around the subject.
+
+Mosaics saved before this converter keep the original one, so they regenerate exactly as saved. The Grid step offers to switch them over.
 
 The background mask is stored in the photo's own coordinates, so it stays in place when you rotate or straighten afterwards. The mask and the touch-ups are saved with the mosaic and included in exports.
 
@@ -79,16 +100,20 @@ To serve from your own domain, add a `routes` entry with `custom_domain: true` t
 ## Project layout
 
 ```
-src/lib/image.ts        image loading, cropping, rotated/straightened rendering
+src/lib/image.ts        image loading, rotated/straightened rendering, full-resolution crop renderer
+src/lib/crop.ts         free crop: shapes, handles, keeping grid and crop the same shape
 src/lib/transform.ts    rotate / mirror / straighten as affine maps
-src/lib/preprocess.ts   crop → cell colours, with auto levels, even lighting, simplify, outlines
+src/lib/sampler.ts      picks the cell sampler for a mosaic's converter
+src/lib/preprocess.ts   crop → cell colours (average or main colour), auto levels, even lighting, simplify, outlines
+src/lib/regions.ts      merge small areas, Otsu threshold
 src/lib/mask.ts         background mask: brush, magic wand, auto background, storage
 src/lib/edits.ts        cell touch-ups on top of the automatic pixel art
 src/lib/history.ts      undo / redo stack
-src/lib/quantize.ts     k-means palette + Floyd–Steinberg dithering
+src/lib/quantize.ts     k-means palette, Floyd–Steinberg and ordered dithering
+src/lib/color.ts        hex/RGB helpers and OKLab
 src/lib/pixelize.ts     image → PixelGrid for binary, palette and mystery modes
 src/lib/modes/*.ts      one generator per puzzle type, plus the registry in index.ts
 src/lib/db.ts           IndexedDB storage
 src/components/         editor, gallery, print and book views, SVG renderers
-src/test/               vitest unit tests (puzzle generators, photo tools)
+src/test/               vitest unit tests (puzzle generators, photo tools, crop and converter)
 ```

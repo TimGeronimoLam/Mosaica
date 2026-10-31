@@ -4,10 +4,12 @@ import { useHistory } from '../hooks';
 import type { History } from '../lib/history';
 import { getMosaic, newId, putMosaic } from '../lib/db';
 import { applyEdits, editCount, type CellEdits } from '../lib/edits';
-import { cropRect, loadImageElement, prepareSourceBlob, rasterize, renderTransformed, type SourceRaster } from '../lib/image';
+import { CROP_RATIOS, currentBox, dragRatio, largestBox, ratioValue, reconcile, withRatio, type CropRatio } from '../lib/crop';
+import { createCropRenderer, cropRect, loadImageElement, prepareSourceBlob, rasterize, renderTransformed, type SourceRaster } from '../lib/image';
 import { MASK_MAX, decodeMask, encodeMask, maskCoverage, resizeMask, transformMask, type PhotoMask } from '../lib/mask';
-import { MODES, MODE_BY_ID, defaultSettings, generatePuzzle, normalizeSettings } from '../lib/modes';
-import { pixelize } from '../lib/pixelize';
+import { MODES, MODE_BY_ID, defaultSettings, generatePuzzle, loadSettings, normalizeSettings } from '../lib/modes';
+import { pixelize, suggestThreshold } from '../lib/pixelize';
+import { makeSampler } from '../lib/sampler';
 import { randomSeed } from '../lib/rng';
 import { renderThumbnail } from '../lib/thumbnail';
 import { flipView, rotateView, transformedAspect } from '../lib/transform';
@@ -15,6 +17,7 @@ import { navigate } from '../router';
 import { Logo } from './Header';
 import {
   IconChevronDown,
+  IconCrop,
   IconEye,
   IconFlipH,
   IconFlipV,
@@ -80,13 +83,17 @@ function makeSource(blob: Blob, img: HTMLImageElement): Source {
 function build(source: Source, d: Doc) {
   const effective = normalizeSettings(d.mode, d.settings);
   const photo = renderTransformed(source.img, effective);
-  const mask = d.mask ? transformMask(d.mask, photoToMask(photo, source.maskBase.width, source.maskBase.height), photo.raster.width, photo.raster.height) : null;
-  const grid = applyEdits(pixelize(photo.raster, effective, MODE_BY_ID[d.mode].kind(effective), mask), d.edits);
+  const toMask = photoToMask(photo, source.maskBase.width, source.maskBase.height);
+  const legacy = effective.converter < 2;
+  const photoMask = d.mask && legacy ? transformMask(d.mask, toMask, photo.raster.width, photo.raster.height) : null;
+  const sampler = makeSampler({ photo, settings: effective, mask: d.mask, toMask, photoMask, renderer: legacy ? null : createCropRenderer(source.img, photo) });
+  const grid = applyEdits(pixelize(sampler, effective, MODE_BY_ID[d.mode].kind(effective)), d.edits);
   return { effective, grid, puzzle: generatePuzzle(d.mode, grid, effective) };
 }
 
-function heightFor(img: HTMLImageElement, s: Pick<MosaicSettings, 'rotate'>, width: number): number {
-  return Math.max(2, Math.round(width / transformedAspect(img.naturalWidth, img.naturalHeight, s)));
+/** Width / height of the photo after rotating. */
+function photoAspect(img: HTMLImageElement, s: Pick<MosaicSettings, 'rotate'>): number {
+  return transformedAspect(img.naturalWidth, img.naturalHeight, s);
 }
 
 /** Size of an element's content box, kept up to date. */
@@ -167,7 +174,7 @@ export function Editor({ id }: { id: string | null }) {
         } else {
           const loaded: Doc = {
             mode: rec.mode,
-            settings: { ...defaultSettings(rec.mode, rec.settings.seed), ...rec.settings },
+            settings: loadSettings(rec.mode, rec.settings),
             mask: rec.mask ? resizeMask(decodeMask(rec.mask), src.maskBase.width, src.maskBase.height) : null,
             edits: rec.edits ?? null,
           };
@@ -195,10 +202,7 @@ export function Editor({ id }: { id: string | null }) {
     (patch: Partial<MosaicSettings>, mergeKey: string | null = null) => {
       setDoc((prev) => {
         const next = { ...prev.settings, ...patch };
-        if (source && next.lockAspect && (patch.gridWidth !== undefined || patch.lockAspect || patch.rotate !== undefined)) {
-          next.gridHeight = heightFor(source.img, next, next.gridWidth);
-        }
-        return { ...prev, settings: next };
+        return { ...prev, settings: source ? reconcile(next, photoAspect(source.img, next)) : next };
       }, mergeKey);
     },
     [source, setDoc],
@@ -206,15 +210,15 @@ export function Editor({ id }: { id: string | null }) {
   const slide = (key: keyof MosaicSettings) => (v: number) => update({ [key]: v }, key);
   const setMask = useCallback((mask: PhotoMask | null) => setDoc((prev) => ({ ...prev, mask })), [setDoc]);
   const setEdits = useCallback((edits: CellEdits | null) => setDoc((prev) => ({ ...prev, edits })), [setDoc]);
-  const onCrop = useCallback((patch: { cx?: number; cy?: number; zoom?: number }) => update(patch, 'crop'), [update]);
+  const onCrop = useCallback((crop: MosaicSettings['crop']) => update({ crop }, 'crop'), [update]);
 
   const changeMode = (m: ModeId) => {
     const d = MODE_BY_ID[m];
     setDoc((prev) => {
       const next = { ...prev.settings, ...d.force, gridWidth: d.defaultWidth };
-      if (source && prev.settings.lockAspect) next.gridHeight = heightFor(source.img, next, next.gridWidth);
-      else next.gridHeight = Math.round((prev.settings.gridHeight / prev.settings.gridWidth) * next.gridWidth);
-      return { ...prev, mode: m, settings: normalizeSettings(m, next) };
+      next.gridHeight = Math.max(2, Math.round((prev.settings.gridHeight / prev.settings.gridWidth) * next.gridWidth));
+      const fitted = normalizeSettings(m, source ? reconcile(next, photoAspect(source.img, next)) : next);
+      return { ...prev, mode: m, settings: fitted };
     });
   };
 
@@ -222,12 +226,11 @@ export function Editor({ id }: { id: string | null }) {
     setDoc((prev) => {
       const s = prev.settings;
       const next = { ...s, ...rotateView(s, dir) };
-      if (source && s.lockAspect) next.gridHeight = heightFor(source.img, next, next.gridWidth);
-      else {
+      if (!s.lockAspect) {
         next.gridWidth = s.gridHeight;
         next.gridHeight = s.gridWidth;
       }
-      return { ...prev, settings: normalizeSettings(prev.mode, next) };
+      return { ...prev, settings: normalizeSettings(prev.mode, source ? reconcile(next, photoAspect(source.img, next)) : next) };
     });
   };
 
@@ -243,9 +246,10 @@ export function Editor({ id }: { id: string | null }) {
       const blob = await prepareSourceBlob(file, img);
       setSource(makeSource(blob, img));
       // A new photo starts upright and uncropped, without the old photo's mask or touch-ups.
-      const s: MosaicSettings = { ...settings, rotate: 0, flipH: false, flipV: false, straighten: 0, zoom: 1, cx: 0.5, cy: 0.5 };
-      if (s.lockAspect) s.gridHeight = heightFor(img, s, s.gridWidth);
-      history.reset({ mode, settings: s, mask: null, edits: null });
+      const base: MosaicSettings = { ...settings, rotate: 0, flipH: false, flipV: false, straighten: 0, zoom: 1, cx: 0.5, cy: 0.5 };
+      const A = photoAspect(img, base);
+      const s = reconcile({ ...base, crop: largestBox(base.lockAspect ? ratioValue(base.cropRatio, A) : base.gridWidth / base.gridHeight, A) }, A);
+      history.reset({ mode, settings: normalizeSettings(mode, s), mask: null, edits: null });
       if (!title) setTitle(file.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' '));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -259,11 +263,18 @@ export function Editor({ id }: { id: string | null }) {
   const { rotate, flipH, flipV, straighten } = effective;
   const photo = useMemo(() => (source ? renderTransformed(source.img, { rotate, flipH, flipV, straighten }) : null), [source, rotate, flipH, flipV, straighten]);
   const toMask = useMemo(() => (photo && source ? photoToMask(photo, source.maskBase.width, source.maskBase.height) : null), [photo, source]);
+  const legacy = effective.converter < 2;
+  // Converter 1 samples a mask resampled onto the working copy; converter 2 maps it per crop.
   const photoMask = useMemo(
-    () => (photo && toMask && deferred.mask ? transformMask(deferred.mask, toMask, photo.raster.width, photo.raster.height) : null),
-    [photo, toMask, deferred.mask],
+    () => (legacy && photo && toMask && deferred.mask ? transformMask(deferred.mask, toMask, photo.raster.width, photo.raster.height) : null),
+    [legacy, photo, toMask, deferred.mask],
   );
-  const baseGrid = useMemo(() => (photo ? pixelize(photo.raster, effective, deferredDef.kind(effective), photoMask) : null), [photo, effective, deferredDef, photoMask]);
+  const renderer = useMemo(() => (!legacy && source && photo ? createCropRenderer(source.img, photo) : null), [legacy, source, photo]);
+  const sampler = useMemo(
+    () => (photo ? makeSampler({ photo, settings: effective, mask: deferred.mask, toMask, photoMask, renderer }) : null),
+    [photo, effective, deferred.mask, toMask, photoMask, renderer],
+  );
+  const baseGrid = useMemo(() => (sampler ? pixelize(sampler, effective, deferredDef.kind(effective)) : null), [sampler, effective, deferredDef]);
   const grid = useMemo(() => (baseGrid ? applyEdits(baseGrid, deferred.edits) : null), [baseGrid, deferred.edits]);
   const puzzle = useMemo(() => (grid ? generatePuzzle(deferred.mode, grid, effective) : null), [grid, deferred.mode, effective]);
   const pixelPreview = useMemo(() => (grid ? renderThumbnail(grid, 260) : ''), [grid]);
@@ -347,6 +358,23 @@ export function Editor({ id }: { id: string | null }) {
   if (loading) return <div className="page narrow muted">Loading mosaic…</div>;
 
   const crop = photo ? cropRect(photo.raster, settings.gridWidth, settings.gridHeight, settings) : null;
+  const A = photo ? photo.raster.width / photo.raster.height : 1;
+  const box = photo ? currentBox(photo.raster, settings.gridWidth, settings.gridHeight, settings) : null;
+  const ratio = dragRatio(settings, A);
+  const setCropRatio = (r: CropRatio) => {
+    if (!box) return;
+    const value = ratioValue(r, A);
+    update({ cropRatio: r, crop: value === null ? box : withRatio(box, value, A) });
+  };
+  const resetCrop = () => update({ crop: largestBox(ratio, A) });
+  const openCrop = () => {
+    setPhotoTools((t) => ({ ...t, tool: 'crop' }));
+    openView('photo');
+  };
+  const autoThreshold = () => sampler && update({ threshold: suggestThreshold(sampler, effective, deferredDef.kind(effective)) });
+  const upgradeConverter = () =>
+    update({ converter: 2, cellColor: 'main', minRegion: 3, despeckle: 0, ditherStyle: settings.dither ? 'diffusion' : 'pattern' });
+  const ditherValue = !settings.dither ? 'off' : settings.ditherStyle;
   const show = (key: string) => def.settings.includes(key as never);
   const isBinary = def.kind(settings) === 'binary' || def.kind(settings) === 'mystery';
   const usesSeed = mode === 'fillapix' || mode === 'logipix' || mode === 'labymage' || (mode === 'colorByCode' && settings.labelStyle === 'sums') || def.kind(settings) === 'palette';
@@ -492,15 +520,29 @@ export function Editor({ id }: { id: string | null }) {
                 </button>
               </div>
               <Slider label="Straighten" value={settings.straighten} min={-45} max={45} step={0.5} onChange={slide('straighten')} format={(v) => `${v > 0 ? '+' : ''}${v}°`} />
-              <Slider label="Zoom" value={settings.zoom} min={1} max={4} step={0.05} onChange={slide('zoom')} format={(v) => `${v.toFixed(2)}×`} />
-              {(settings.zoom > 1 || !settings.lockAspect) && (
-                <>
-                  <Slider label="Pan left / right" value={settings.cx} min={0} max={1} step={0.01} onChange={slide('cx')} format={(v) => `${Math.round(v * 100)}%`} />
-                  <Slider label="Pan up / down" value={settings.cy} min={0} max={1} step={0.01} onChange={slide('cy')} format={(v) => `${Math.round(v * 100)}%`} />
-                </>
-              )}
+              <div className="panel-row">
+                <label className="field inline">
+                  <span>Crop shape</span>
+                  <select value={settings.lockAspect ? settings.cropRatio : 'grid'} disabled={!settings.lockAspect} onChange={(e) => setCropRatio(e.target.value as CropRatio)}>
+                    {!settings.lockAspect && <option value="grid">Same as the grid</option>}
+                    {CROP_RATIOS.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="panel-row">
+                <button className="btn small" onClick={openCrop}>
+                  <IconCrop size={16} /> Crop…
+                </button>
+                <button className="btn small ghost" onClick={resetCrop}>
+                  Reset crop
+                </button>
+              </div>
               <p className="hint">
-                Tip: in the <button className="link" onClick={() => openView('photo')}>Photo view</button> you can drag the frame and remove a busy background.
+                Crop to any shape in the <button className="link" onClick={openCrop}>Photo view</button>, where you can also remove a busy background. A tight crop gives each detail more cells.
               </p>
             </>
           )}
@@ -529,22 +571,94 @@ export function Editor({ id }: { id: string | null }) {
           </h2>
           <Slider label="Width (cells)" value={settings.gridWidth} min={5} max={def.maxWidth} onChange={slide('gridWidth')} />
           {!settings.lockAspect && <Slider label="Height (cells)" value={settings.gridHeight} min={5} max={Math.round(def.maxWidth * 1.5)} onChange={slide('gridHeight')} />}
-          <Toggle label="Keep image proportions" checked={settings.lockAspect} onChange={(v) => update({ lockAspect: v })} />
+          <Toggle
+            label="Height follows the crop"
+            checked={settings.lockAspect}
+            onChange={(v) => update({ lockAspect: v })}
+            hint="Off: set the height yourself and the crop keeps the grid's shape."
+          />
           <span className="size-chip">
             {settings.gridWidth} × {settings.gridHeight} cells{mode === 'labymage' ? ` · maze ${settings.gridWidth * 2} × ${settings.gridHeight * 2}` : ''}
           </span>
+          <div className="field">
+            <span>Each cell takes</span>
+            <Segmented
+              className="block"
+              label="Each cell takes"
+              value={settings.cellColor}
+              onChange={(v) => update({ cellColor: v })}
+              options={[
+                { value: 'main', label: 'Its main colour' },
+                { value: 'average', label: 'The average' },
+              ]}
+            />
+            <span className="hint">
+              {settings.cellColor === 'main'
+                ? 'A cell on an edge takes the colour of the larger side, so edges stay crisp.'
+                : 'Every cell blends all of its pixels, giving softer edges.'}
+            </span>
+          </div>
+          {settings.converter < 2 && (
+            <div className="alert info compact">
+              <span>Made with the earlier converter, so it regenerates exactly as saved.</span>
+              <button className="link" onClick={upgradeConverter}>
+                Use the sharper converter
+              </button>
+            </div>
+          )}
         </section>
 
         <section className="panel">
           <h2 className="panel-title">
             <span className="step">4</span> {def.name} settings
           </h2>
-          {show('threshold') && isBinary && <Slider label="Ink threshold" value={settings.threshold} min={5} max={95} onChange={slide('threshold')} format={(v) => `${v}%`} />}
+          {show('threshold') && isBinary && (
+            <>
+              <Slider label="Ink threshold" value={settings.threshold} min={5} max={95} onChange={slide('threshold')} format={(v) => `${v}%`} />
+              <div className="panel-row tight">
+                <button className="btn small" onClick={autoThreshold} title="Pick the cut that best separates the photo's dark and light parts (Otsu's method)">
+                  <IconSparkles size={16} /> Auto threshold
+                </button>
+              </div>
+            </>
+          )}
           {show('colors') && !isBinary && <Slider label="Colours" value={settings.colors} min={2} max={16} onChange={slide('colors')} />}
           {show('blankLightest') && !isBinary && (
             <Toggle label="Lightest colour stays white" checked={settings.blankLightest} onChange={(v) => update({ blankLightest: v })} hint="The lightest colour becomes code 0 and is left unpainted." />
           )}
-          {show('dither') && <Toggle label="Dither (textured shading)" checked={settings.dither} onChange={(v) => update({ dither: v })} />}
+          {show('dither') &&
+            (settings.converter < 2 || def.kind(settings) === 'mystery' ? (
+              <Toggle label="Dither (textured shading)" checked={settings.dither} onChange={(v) => update({ dither: v })} />
+            ) : (
+              <div className="field">
+                <span>Shading</span>
+                <Segmented
+                  className="block"
+                  label="Shading"
+                  value={ditherValue}
+                  onChange={(v) => update(v === 'off' ? { dither: false } : { dither: true, ditherStyle: v })}
+                  options={[
+                    { value: 'off', label: 'Flat' },
+                    { value: 'pattern', label: 'Pattern' },
+                    { value: 'diffusion', label: 'Speckle' },
+                  ]}
+                />
+              </div>
+            ))}
+          {show('dither') && settings.dither && <Slider label="Shading strength" value={settings.ditherAmount} min={10} max={100} step={5} onChange={slide('ditherAmount')} format={(v) => `${v}%`} />}
+          {def.kind(settings) !== 'mystery' && (
+            <>
+              <Slider
+                label="Merge areas smaller than"
+                value={settings.minRegion}
+                min={0}
+                max={12}
+                onChange={slide('minRegion')}
+                format={(v) => (settings.dither ? 'off while shading' : v < 2 ? 'off' : `${v} cells`)}
+              />
+              <p className="hint">Tiny islands of one or two cells are mostly photo noise and tedious to colour; they join the area around them.</p>
+            </>
+          )}
           {show('labelStyle') && (
             <>
               <label className="field">
@@ -621,7 +735,9 @@ export function Editor({ id }: { id: string | null }) {
           <Slider label="Simplify textures" value={settings.smooth} min={0} max={100} onChange={slide('smooth')} format={pct} />
           <Slider label="Keep dark details" value={settings.darkDetails} min={0} max={100} onChange={slide('darkDetails')} format={pct} />
           <Slider label="Outline edges" value={settings.outlines} min={0} max={100} onChange={slide('outlines')} format={pct} />
-          <Slider label="Remove specks" value={settings.despeckle} min={0} max={3} onChange={slide('despeckle')} format={(v) => (v === 0 ? 'off' : `${v}`)} />
+          {(settings.despeckle > 0 || settings.converter < 2) && (
+            <Slider label="Remove specks" value={settings.despeckle} min={0} max={3} onChange={slide('despeckle')} format={(v) => (v === 0 ? 'off' : `${v}`)} />
+          )}
           <Toggle label="Invert" checked={settings.invert} onChange={(v) => update({ invert: v })} />
           {source && (
             <div className="cleanup-status">
@@ -695,8 +811,10 @@ export function Editor({ id }: { id: string | null }) {
                 onTools={(p) => setPhotoTools((t) => ({ ...t, ...p }))}
                 mask={doc.mask}
                 maskBase={source.maskBase}
-                zoom={settings.zoom}
-                onZoom={slide('zoom')}
+                cropRatio={settings.cropRatio}
+                ratioFree={settings.lockAspect}
+                onRatio={setCropRatio}
+                onResetCrop={resetCrop}
                 onMask={setMask}
               />
             )}
@@ -717,9 +835,11 @@ export function Editor({ id }: { id: string | null }) {
                   photo={photo}
                   mask={doc.mask}
                   maskBase={source.maskBase}
-                  crop={crop}
+                  box={box ?? { x: 0, y: 0, w: 1, h: 1 }}
+                  ratio={ratio}
+                  gridWidth={settings.gridWidth}
+                  gridHeight={settings.gridHeight}
                   cellSize={crop.w / settings.gridWidth}
-                  zoom={settings.zoom}
                   displayWidth={stageWidth}
                   tools={photoTools}
                   onCrop={onCrop}
