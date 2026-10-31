@@ -21,6 +21,7 @@ Turn any image into a printable picture puzzle. Mosaica runs entirely in the bro
 - Live preview of the puzzle and its solution while you adjust settings.
 - Save mosaics in the browser (IndexedDB) and manage them in a gallery: open, duplicate, delete, export and import as JSON.
 - Print a single puzzle (A4 or Letter, with an optional solution page) or build a book: cover, how-to-play page, contents, one puzzle per page and solutions at the back.
+- Works on phones, tablets and desktops: on narrow screens the editor switches between an Edit and a Preview pane, and print pages shrink to fit the screen (they always print at full size).
 
 ## Development
 

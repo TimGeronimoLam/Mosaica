@@ -4,8 +4,10 @@ import { useMosaics } from '../hooks';
 import { MODE_BY_ID, MODES } from '../lib/modes';
 import { href } from '../router';
 import { Logo } from './Header';
+import { IconArrowDown, IconArrowLeft, IconArrowUp, IconBook, IconInfo, IconPlus, IconPrinter } from './Icons';
 import { PrintRoot, PuzzleSheet, Sheet, SheetFooter } from './Sheet';
 import { PuzzleSvg, puzzleSummary } from './PuzzleSvg';
+import { Segmented, Toggle } from './ui';
 
 interface BookOptions {
   title: string;
@@ -168,117 +170,157 @@ export function BookView({ query }: { query: URLSearchParams }) {
     }
   }
 
-  return (
-    <div className="print-page book-page">
-      <div className="book-toolbar no-print">
-        <div className="book-toolbar-row">
-          <a className="btn" href={href('/')}>
-            ← My mosaics
-          </a>
-          <button className="btn primary" onClick={() => window.print()} disabled={chosen.length === 0}>
-            Print book
-          </button>
-        </div>
-        <div className="book-options">
-          <label>
-            Book title
-            <input value={opts.title} onChange={(e) => set('title', e.target.value)} />
-          </label>
-          <label>
-            Subtitle
-            <input value={opts.subtitle} onChange={(e) => set('subtitle', e.target.value)} placeholder="e.g. Puzzles for Grandma" />
-          </label>
-          <label>
-            Paper
-            <select value={opts.paper} onChange={(e) => set('paper', e.target.value as PaperSize)}>
-              <option value="A4">A4</option>
-              <option value="Letter">Letter</option>
-            </select>
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={opts.includeHowTo} onChange={(e) => set('includeHowTo', e.target.checked)} /> How-to-play page
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={opts.includeContents} onChange={(e) => set('includeContents', e.target.checked)} /> Contents page
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={opts.showRules} onChange={(e) => set('showRules', e.target.checked)} /> Rules on each puzzle
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={opts.includeSolutions} onChange={(e) => set('includeSolutions', e.target.checked)} /> Solutions at the back
-          </label>
-        </div>
-        <div className="book-picker">
-          <div className="book-picker-head">
-            <strong>
-              {chosen.length} of {mosaics.length} mosaics in the book
-            </strong>
-            <span>
-              <button className="link" onClick={() => setSelected(new Set(order ?? []))}>
-                Select all
-              </button>
-              {' · '}
-              <button className="link" onClick={() => setSelected(new Set())}>
-                None
-              </button>
-            </span>
-          </div>
-          <ul className="book-list">
-            {(order ?? []).map((id, i) => {
-              const m = byId.get(id);
-              if (!m) return null;
-              return (
-                <li key={id} className={selected?.has(id) ? 'on' : ''}>
-                  <label>
-                    <input type="checkbox" checked={!!selected?.has(id)} onChange={() => toggle(id)} />
-                    <img src={m.thumbnail} alt="" />
-                    <span className="book-list-title">{m.title || 'Untitled mosaic'}</span>
-                    <span className="book-list-mode">{MODE_BY_ID[m.mode].name}</span>
-                  </label>
-                  <span className="book-list-actions">
-                    <button className="icon" title="Move up" onClick={() => move(id, -1)} disabled={i === 0}>
-                      ↑
-                    </button>
-                    <button className="icon" title="Move down" onClick={() => move(id, 1)} disabled={i === (order?.length ?? 0) - 1}>
-                      ↓
-                    </button>
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-          {!loading && mosaics.length === 0 && (
-            <p className="muted">
-              You have no saved mosaics yet. <a href={href('/new')}>Make one</a> and it will appear here.
-            </p>
-          )}
-        </div>
-      </div>
+  const totalPages = chosen.length ? page : 0;
 
-      {chosen.length > 0 && (
-        <PrintRoot paper={opts.paper} orientation="portrait">
-          <Sheet className="cover-sheet">
-            <div className="cover">
-              <div className="cover-art">
-                {chosen.slice(0, 9).map((c) => (
-                  <img key={c.id} src={c.thumbnail} alt="" />
-                ))}
-              </div>
-              <h1 className="cover-title">{opts.title || 'My Mosaic Book'}</h1>
-              {opts.subtitle && <p className="cover-subtitle">{opts.subtitle}</p>}
-              <p className="cover-meta">
-                {chosen.length} {chosen.length === 1 ? 'puzzle' : 'puzzles'} · {modesUsed.map((m) => m.name).join(', ')}
-              </p>
-              <div className="cover-brand">
-                <Logo size={18} /> Made with Mosaica
-              </div>
+  return (
+    <div className="print-layout book-page">
+      <aside className="print-panel no-print" aria-label="Book options">
+        <div className="print-panel-body">
+          <a className="back-link" href={href('/')}>
+            <IconArrowLeft size={16} /> My mosaics
+          </a>
+          <h1>Print a book</h1>
+          <p className="lead">A cover, a how-to-play page, contents, one puzzle per page and the solutions at the back.</p>
+
+          <div className="option-group">
+            <label className="field">
+              <span>Book title</span>
+              <input value={opts.title} onChange={(e) => set('title', e.target.value)} />
+            </label>
+            <label className="field">
+              <span>Subtitle</span>
+              <input value={opts.subtitle} onChange={(e) => set('subtitle', e.target.value)} placeholder="e.g. Puzzles for Grandma" />
+            </label>
+            <div className="option-row">
+              <span className="option-label">Paper</span>
+              <Segmented
+                className="block"
+                label="Paper"
+                value={opts.paper}
+                onChange={(v) => set('paper', v)}
+                options={[
+                  { value: 'A4', label: 'A4' },
+                  { value: 'Letter', label: 'Letter' },
+                ]}
+              />
             </div>
-          </Sheet>
-          {frontPages}
-          {puzzlePages}
-          {solutionPages}
-        </PrintRoot>
-      )}
+          </div>
+
+          <div className="option-group">
+            <Toggle label="How-to-play page" checked={opts.includeHowTo} onChange={(v) => set('includeHowTo', v)} />
+            <Toggle label="Contents page" checked={opts.includeContents} onChange={(v) => set('includeContents', v)} />
+            <Toggle label="Rules on each puzzle" checked={opts.showRules} onChange={(v) => set('showRules', v)} />
+            <Toggle label="Solutions at the back" checked={opts.includeSolutions} onChange={(v) => set('includeSolutions', v)} />
+          </div>
+
+          <div className="option-group book-picker">
+            <div className="book-picker-head">
+              <span className="option-label">
+                Mosaics{' '}
+                <span className="muted">
+                  ({chosen.length} of {mosaics.length})
+                </span>
+              </span>
+              {mosaics.length > 0 && (
+                <span className="book-picker-tools">
+                  <button className="link" aria-label="Select all" onClick={() => setSelected(new Set(order ?? []))}>
+                    All
+                  </button>
+                  <button className="link" aria-label="Select none" onClick={() => setSelected(new Set())}>
+                    None
+                  </button>
+                </span>
+              )}
+            </div>
+            {mosaics.length > 0 && (
+              <ul className="book-list">
+                {(order ?? []).map((id, i) => {
+                  const m = byId.get(id);
+                  if (!m) return null;
+                  const title = m.title || 'Untitled mosaic';
+                  return (
+                    <li key={id} className={selected?.has(id) ? 'on' : ''}>
+                      <label>
+                        <input type="checkbox" checked={!!selected?.has(id)} onChange={() => toggle(id)} />
+                        <img src={m.thumbnail} alt="" />
+                        <span className="book-list-text">
+                          <span className="book-list-title">{title}</span>
+                          <span className="book-list-mode">{MODE_BY_ID[m.mode].name}</span>
+                        </span>
+                      </label>
+                      <span className="book-list-actions">
+                        <button className="btn ghost icon-only" aria-label={`Move ${title} up`} title="Move up" onClick={() => move(id, -1)} disabled={i === 0}>
+                          <IconArrowUp size={16} />
+                        </button>
+                        <button className="btn ghost icon-only" aria-label={`Move ${title} down`} title="Move down" onClick={() => move(id, 1)} disabled={i === (order?.length ?? 0) - 1}>
+                          <IconArrowDown size={16} />
+                        </button>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {!loading && mosaics.length === 0 && (
+              <p className="muted small">
+                You have no saved mosaics yet. <a href={href('/new')}>Make one</a> and it will appear here.
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="print-panel-foot">
+          <button className="btn primary large block" onClick={() => window.print()} disabled={chosen.length === 0}>
+            <IconPrinter /> {totalPages ? `Print ${totalPages} pages` : 'Print book'}
+          </button>
+          <p className="print-tip">
+            <IconInfo size={15} />
+            <span>In the print dialog, choose {opts.paper} paper and turn off headers and footers.</span>
+          </p>
+        </div>
+      </aside>
+
+      <div className="print-stage">
+        {chosen.length === 0 ? (
+          !loading && (
+            <div className="stage-empty">
+              <IconBook size={32} />
+              {mosaics.length === 0 ? (
+                <>
+                  <p>Your book is built from the mosaics in your gallery.</p>
+                  <a className="btn primary" href={href('/new')}>
+                    <IconPlus /> Make a mosaic
+                  </a>
+                </>
+              ) : (
+                <p>Pick at least one mosaic to see the pages of your book.</p>
+              )}
+            </div>
+          )
+        ) : (
+          <PrintRoot paper={opts.paper} orientation="portrait">
+            <Sheet className="cover-sheet">
+              <div className="cover">
+                <div className="cover-art">
+                  {chosen.slice(0, 9).map((c) => (
+                    <img key={c.id} src={c.thumbnail} alt="" />
+                  ))}
+                </div>
+                <h1 className="cover-title">{opts.title || 'My Mosaic Book'}</h1>
+                {opts.subtitle && <p className="cover-subtitle">{opts.subtitle}</p>}
+                <p className="cover-meta">
+                  {chosen.length} {chosen.length === 1 ? 'puzzle' : 'puzzles'} · {modesUsed.map((m) => m.name).join(', ')}
+                </p>
+                <div className="cover-brand">
+                  <Logo size={18} /> Made with Mosaica
+                </div>
+              </div>
+            </Sheet>
+            {frontPages}
+            {puzzlePages}
+            {solutionPages}
+          </PrintRoot>
+        )}
+      </div>
     </div>
   );
 }

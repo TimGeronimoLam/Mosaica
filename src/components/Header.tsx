@@ -1,4 +1,6 @@
+import type { ReactNode } from 'react';
 import { href, useRoute } from '../router';
+import { IconBook, IconMosaics, IconPlus } from './Icons';
 
 export function Logo({ size = 22 }: { size?: number }) {
   const s = size;
@@ -17,21 +19,25 @@ export function Logo({ size = 22 }: { size?: number }) {
 export function Header() {
   const route = useRoute();
   const first = route.segments[0] ?? '';
-  const link = (path: string, label: string, active: boolean) => (
-    <a className={active ? 'nav-link active' : 'nav-link'} href={href(path)}>
-      {label}
+  const link = (path: string, icon: ReactNode, full: string, short: string, active: boolean) => (
+    <a className={active ? 'nav-link active' : 'nav-link'} href={href(path)} aria-current={active ? 'page' : undefined}>
+      {icon}
+      <span className="nav-full">{full}</span>
+      <span className="nav-short" aria-hidden="true">
+        {short}
+      </span>
     </a>
   );
   return (
     <header className="header no-print">
-      <a className="brand" href={href('/')}>
-        <Logo />
-        <span>Mosaica</span>
+      <a className="brand" href={href('/')} aria-label="Mosaica home">
+        <Logo size={26} />
+        <span className="brand-name">Mosaica</span>
       </a>
-      <nav className="nav">
-        {link('/', 'My mosaics', first === '')}
-        {link('/new', 'New mosaic', first === 'new' || first === 'edit')}
-        {link('/book', 'Print a book', first === 'book')}
+      <nav className="nav" aria-label="Main">
+        {link('/', <IconMosaics size={16} />, 'My mosaics', 'Mosaics', first === '')}
+        {link('/new', <IconPlus size={16} />, 'New mosaic', 'New', first === 'new' || first === 'edit')}
+        {link('/book', <IconBook size={16} />, 'Print a book', 'Book', first === 'book')}
       </nav>
     </header>
   );
