@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { MosaicRecord, Orientation, PaperSize } from '../types';
 import { getMosaic } from '../lib/db';
+import { MODE_BY_ID } from '../lib/modes';
 import { href } from '../router';
+import { IconArrowLeft, IconInfo, IconPrinter, ModeChip } from './Icons';
 import { PrintRoot, PuzzleSheet } from './Sheet';
+import { puzzleSummary } from './PuzzleSvg';
+import { Segmented, Toggle } from './ui';
 
 function readPref<T extends string>(key: string, fallback: T): T {
   try {
@@ -31,7 +35,7 @@ export function PrintView({ id }: { id: string }) {
     }
   }, [paper]);
 
-  if (record === undefined) return <div className="page narrow">Loading…</div>;
+  if (record === undefined) return <div className="page narrow muted">Loading…</div>;
   if (record === null) {
     return (
       <div className="page narrow">
@@ -44,44 +48,74 @@ export function PrintView({ id }: { id: string }) {
   const p = record.puzzle;
   const wide = p.width > p.height * 1.15;
   const effectiveOrientation: Orientation = orientation === 'auto' ? (wide ? 'landscape' : 'portrait') : orientation;
+  const pages = includeSolution ? 2 : 1;
+  const def = MODE_BY_ID[record.mode];
 
   return (
-    <div className="print-page">
-      <div className="print-toolbar no-print">
-        <a className="btn" href={href(`/edit/${record.id}`)}>
-          ← Back to editor
-        </a>
-        <div className="print-options">
-          <label>
-            Paper
-            <select value={paper} onChange={(e) => setPaper(e.target.value as PaperSize)}>
-              <option value="A4">A4</option>
-              <option value="Letter">Letter</option>
-            </select>
-          </label>
-          <label>
-            Orientation
-            <select value={orientation} onChange={(e) => setOrientation(e.target.value as Orientation | 'auto')}>
-              <option value="auto">Auto</option>
-              <option value="portrait">Portrait</option>
-              <option value="landscape">Landscape</option>
-            </select>
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={showRules} onChange={(e) => setShowRules(e.target.checked)} /> How to play
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={includeSolution} onChange={(e) => setIncludeSolution(e.target.checked)} /> Solution page
-          </label>
+    <div className="print-layout">
+      <aside className="print-panel no-print" aria-label="Print options">
+        <div className="print-panel-body">
+          <a className="back-link" href={href(`/edit/${record.id}`)}>
+            <IconArrowLeft size={16} /> Back to editor
+          </a>
+          <h1>Print</h1>
+          <p className="lead">
+            {record.title || 'Untitled mosaic'} · {puzzleSummary(p)}
+          </p>
+          {def && <ModeChip mode={record.mode} name={def.name} />}
+
+          <div className="option-group">
+            <div className="option-row">
+              <span className="option-label">Paper</span>
+              <Segmented
+                className="block"
+                label="Paper"
+                value={paper}
+                onChange={setPaper}
+                options={[
+                  { value: 'A4', label: 'A4' },
+                  { value: 'Letter', label: 'Letter' },
+                ]}
+              />
+            </div>
+            <div className="option-row">
+              <span className="option-label">Orientation</span>
+              <Segmented
+                className="block"
+                label="Orientation"
+                value={orientation}
+                onChange={setOrientation}
+                options={[
+                  { value: 'auto', label: 'Auto' },
+                  { value: 'portrait', label: 'Portrait' },
+                  { value: 'landscape', label: 'Landscape' },
+                ]}
+              />
+            </div>
+          </div>
+          <div className="option-group">
+            <Toggle label="How to play" checked={showRules} onChange={setShowRules} />
+            <Toggle label="Solution page" checked={includeSolution} onChange={setIncludeSolution} />
+          </div>
         </div>
-        <button className="btn primary" onClick={() => window.print()}>
-          Print
-        </button>
+        <div className="print-panel-foot">
+          <button className="btn primary large block" onClick={() => window.print()}>
+            <IconPrinter /> Print {pages} {pages === 1 ? 'page' : 'pages'}
+          </button>
+          <p className="print-tip">
+            <IconInfo size={15} />
+            <span>
+              In the print dialog, choose {paper} paper and turn off headers and footers.
+            </span>
+          </p>
+        </div>
+      </aside>
+      <div className="print-stage">
+        <PrintRoot paper={paper} orientation={effectiveOrientation}>
+          <PuzzleSheet record={record} solution={false} showRules={showRules} />
+          {includeSolution && <PuzzleSheet record={record} solution showRules={false} />}
+        </PrintRoot>
       </div>
-      <PrintRoot paper={paper} orientation={effectiveOrientation}>
-        <PuzzleSheet record={record} solution={false} showRules={showRules} />
-        {includeSolution && <PuzzleSheet record={record} solution showRules={false} />}
-      </PrintRoot>
     </div>
   );
 }
