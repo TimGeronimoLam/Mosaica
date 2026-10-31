@@ -100,6 +100,15 @@ export function MenuItem({ icon, children, onSelect, danger }: { icon?: ReactNod
   );
 }
 
+/** Keep receiving a pointer's moves outside the element; harmless if the pointer is already gone. */
+export function capture(el: Element | null, pointerId: number): void {
+  try {
+    el?.setPointerCapture(pointerId);
+  } catch {
+    // The pointer was released before we could capture it.
+  }
+}
+
 /* ---------- Segmented control ---------- */
 
 export function Segmented<T extends string>({

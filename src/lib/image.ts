@@ -1,4 +1,5 @@
 import type { MosaicSettings } from '../types';
+import { transformFor, type Affine, type PhotoTransform } from './transform';
 
 /** RGBA pixels of the source image, capped in size for speed. */
 export interface SourceRaster {
@@ -40,6 +41,41 @@ export function rasterize(img: HTMLImageElement, maxSize = 1024): SourceRaster {
   ctx.drawImage(img, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h).data;
   return { width: w, height: h, data };
+}
+
+/** Size of the working copy of a picture: no larger than maxSize on its longest side. */
+export function baseSize(img: HTMLImageElement, maxSize = 1024): { width: number; height: number } {
+  const scale = Math.min(1, maxSize / Math.max(img.naturalWidth, img.naturalHeight));
+  return { width: Math.max(1, Math.round(img.naturalWidth * scale)), height: Math.max(1, Math.round(img.naturalHeight * scale)) };
+}
+
+/** The photo after rotating, mirroring and straightening, ready for sampling and display. */
+export interface TransformedPhoto {
+  raster: SourceRaster;
+  canvas: HTMLCanvasElement;
+  /** Maps pixels of the untransformed working copy (baseWidth x baseHeight) to `raster` pixels. */
+  m: Affine;
+  baseWidth: number;
+  baseHeight: number;
+}
+
+export function renderTransformed(img: HTMLImageElement, t: PhotoTransform, maxSize = 1024): TransformedPhoto {
+  const base = baseSize(img, maxSize);
+  const { m, width, height } = transformFor(base.width, base.height, t);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas is not available in this browser.');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.setTransform(...m);
+  ctx.drawImage(img, 0, 0, base.width, base.height);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const data = ctx.getImageData(0, 0, width, height).data;
+  return { raster: { width, height, data }, canvas, m, baseWidth: base.width, baseHeight: base.height };
 }
 
 /** Re-encode a blob so that very large originals do not bloat the database. */
@@ -87,63 +123,6 @@ export function cropRect(src: { width: number; height: number }, w: number, h: n
   x = Math.max(0, Math.min(src.width - rw, x));
   y = Math.max(0, Math.min(src.height - rh, y));
   return { x, y, w: rw, h: rh };
-}
-
-/**
- * Average the source pixels of each cell. Returns w*h*3 floats in 0..1 (sRGB),
- * with brightness / contrast / saturation applied.
- */
-export function sampleGrid(src: SourceRaster, w: number, h: number, s: MosaicSettings): Float32Array {
-  const rect = cropRect(src, w, h, s);
-  const out = new Float32Array(w * h * 3);
-  const { data, width: sw } = src;
-  const cellW = rect.w / w;
-  const cellH = rect.h / h;
-  const bright = s.brightness / 100 * 0.5;
-  const contrast = s.contrast >= 0 ? 1 + s.contrast / 50 : 1 + s.contrast / 100;
-  const sat = (s.saturation + 100) / 100;
-
-  for (let gy = 0; gy < h; gy++) {
-    const y0 = Math.floor(rect.y + gy * cellH);
-    const y1 = Math.max(y0 + 1, Math.floor(rect.y + (gy + 1) * cellH));
-    for (let gx = 0; gx < w; gx++) {
-      const x0 = Math.floor(rect.x + gx * cellW);
-      const x1 = Math.max(x0 + 1, Math.floor(rect.x + (gx + 1) * cellW));
-      let r = 0;
-      let g = 0;
-      let b = 0;
-      let n = 0;
-      for (let y = y0; y < y1 && y < src.height; y++) {
-        let i = (y * sw + x0) * 4;
-        for (let x = x0; x < x1 && x < sw; x++) {
-          const a = data[i + 3] / 255;
-          r += data[i] * a + 255 * (1 - a);
-          g += data[i + 1] * a + 255 * (1 - a);
-          b += data[i + 2] * a + 255 * (1 - a);
-          n++;
-          i += 4;
-        }
-      }
-      if (n === 0) n = 1;
-      let cr = r / n / 255;
-      let cg = g / n / 255;
-      let cb = b / n / 255;
-      // saturation
-      const l = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
-      cr = l + (cr - l) * sat;
-      cg = l + (cg - l) * sat;
-      cb = l + (cb - l) * sat;
-      // contrast then brightness
-      cr = (cr - 0.5) * contrast + 0.5 + bright;
-      cg = (cg - 0.5) * contrast + 0.5 + bright;
-      cb = (cb - 0.5) * contrast + 0.5 + bright;
-      const o = (gy * w + gx) * 3;
-      out[o] = clamp01(cr);
-      out[o + 1] = clamp01(cg);
-      out[o + 2] = clamp01(cb);
-    }
-  }
-  return out;
 }
 
 export function clamp01(v: number): number {

@@ -1,6 +1,7 @@
 import type { MosaicSettings, PixelGrid, PixelKind } from '../types';
 import { rgbToHex } from './color';
-import { sampleGrid, type SourceRaster } from './image';
+import type { SourceRaster } from './image';
+import { sampleGrid } from './preprocess';
 import { ditherAssign, kmeans } from './quantize';
 import { createRng } from './rng';
 
@@ -32,16 +33,28 @@ export const MYSTERY_POLYGONS: (string | null)[] = [
   '0,0 1,0 1,1 0,1',
 ];
 
-export function pixelize(src: SourceRaster, s: MosaicSettings, kind: PixelKind): PixelGrid {
+/**
+ * Reduce the photo to a grid of palette indices. `mask` (same size as `src`,
+ * 1 = background) marks areas that must stay blank paper: they are left out
+ * of the palette and of dithering.
+ */
+export function pixelize(src: SourceRaster, s: MosaicSettings, kind: PixelKind, mask?: Uint8Array | null): PixelGrid {
   const w = Math.max(2, Math.round(s.gridWidth));
   const h = Math.max(2, Math.round(s.gridHeight));
-  if (kind === 'mystery') return pixelizeMystery(src, w, h, s);
-  if (kind === 'binary') return pixelizeBinary(src, w, h, s);
-  return pixelizePalette(src, w, h, s);
+  if (kind === 'mystery') return pixelizeMystery(src, w, h, s, mask);
+  if (kind === 'binary') return pixelizeBinary(src, w, h, s, mask);
+  return pixelizePalette(src, w, h, s, mask);
 }
 
-function pixelizeBinary(src: SourceRaster, w: number, h: number, s: MosaicSettings): PixelGrid {
-  const pts = sampleGrid(src, w, h, s);
+/** Force removed cells back to `blank` (after invert or despeckle may have changed them). */
+function clearRemoved(cells: number[], removed: Uint8Array | null, blank: number): number[] {
+  if (!removed) return cells;
+  for (let i = 0; i < cells.length; i++) if (removed[i]) cells[i] = blank;
+  return cells;
+}
+
+function pixelizeBinary(src: SourceRaster, w: number, h: number, s: MosaicSettings, mask?: Uint8Array | null): PixelGrid {
+  const { rgb: pts, removed } = sampleGrid(src, w, h, s, mask);
   const n = w * h;
   const t = s.threshold / 100;
   let cells: number[];
@@ -50,7 +63,8 @@ function pixelizeBinary(src: SourceRaster, w: number, h: number, s: MosaicSettin
     const lum = new Float32Array(n * 3);
     for (let i = 0; i < n; i++) {
       const l = 0.2126 * pts[i * 3] + 0.7152 * pts[i * 3 + 1] + 0.0722 * pts[i * 3 + 2];
-      const v = Math.max(0, Math.min(1, l + (0.5 - t)));
+      // Removed cells are pure white with no error to pass on.
+      const v = removed?.[i] ? 1 : Math.max(0, Math.min(1, l + (0.5 - t)));
       lum[i * 3] = lum[i * 3 + 1] = lum[i * 3 + 2] = v;
     }
     cells = ditherAssign(lum, w, h, [
@@ -65,16 +79,36 @@ function pixelizeBinary(src: SourceRaster, w: number, h: number, s: MosaicSettin
     }
   }
   if (s.invert) cells = cells.map((c) => 1 - c);
-  cells = despeckle(cells, w, h, s.despeckle, 2);
+  cells = clearRemoved(cells, removed, 0);
+  cells = clearRemoved(despeckle(cells, w, h, s.despeckle, 2), removed, 0);
   return { width: w, height: h, cells, palette: ['#ffffff', '#000000'], blank: true, kind: 'binary' };
 }
 
-function pixelizePalette(src: SourceRaster, w: number, h: number, s: MosaicSettings): PixelGrid {
-  const pts = sampleGrid(src, w, h, s);
+function pixelizePalette(src: SourceRaster, w: number, h: number, s: MosaicSettings, mask?: Uint8Array | null): PixelGrid {
+  const { rgb: pts, removed } = sampleGrid(src, w, h, s, mask);
+  const n = w * h;
   const k = Math.max(2, Math.min(24, Math.round(s.colors)));
   const rng = createRng(s.seed);
-  const { centers, labels } = kmeans(pts, k, rng);
-  let cells = s.dither ? ditherAssign(pts, w, h, centers) : labels;
+  // Only the cells that are kept take part in choosing the palette, so the
+  // background does not use up colours.
+  let kept = pts;
+  let keptIndex: number[] | null = null;
+  if (removed) {
+    keptIndex = [];
+    for (let i = 0; i < n; i++) if (!removed[i]) keptIndex.push(i);
+    kept = new Float32Array(keptIndex.length * 3);
+    keptIndex.forEach((src, j) => kept.set(pts.subarray(src * 3, src * 3 + 3), j * 3));
+  }
+  const { centers, labels } = kmeans(kept, k, rng);
+  if (!centers.length) {
+    return { width: w, height: h, cells: new Array<number>(n).fill(0), palette: ['#ffffff'], blank: true, kind: 'palette' };
+  }
+  let cells: number[];
+  if (s.dither) cells = ditherAssign(pts, w, h, centers, removed);
+  else if (keptIndex) {
+    cells = new Array<number>(n).fill(0);
+    keptIndex.forEach((src, j) => (cells[src] = labels[j]));
+  } else cells = labels;
   cells = despeckle(cells, w, h, s.despeckle, centers.length);
   let palette = centers.map((c) => rgbToHex(c[0] * 255, c[1] * 255, c[2] * 255));
   let blank = s.blankLightest;
@@ -88,11 +122,18 @@ function pixelizePalette(src: SourceRaster, w: number, h: number, s: MosaicSetti
     cells = cells.map((c) => palette.length - 1 - c);
     blank = false;
   }
+  if (removed && !blank) {
+    // Removed areas need a "leave it white" code of their own.
+    palette = ['#ffffff', ...palette];
+    cells = cells.map((c) => c + 1);
+    blank = true;
+  }
+  cells = clearRemoved(cells, removed, 0);
   return { width: w, height: h, cells, palette, blank, kind: 'palette' };
 }
 
-function pixelizeMystery(src: SourceRaster, w: number, h: number, s: MosaicSettings): PixelGrid {
-  const pts = sampleGrid(src, w * 2, h * 2, s);
+function pixelizeMystery(src: SourceRaster, w: number, h: number, s: MosaicSettings, mask?: Uint8Array | null): PixelGrid {
+  const { rgb: pts, removed } = sampleGrid(src, w * 2, h * 2, s, mask);
   const t = s.threshold / 100;
   const gain = 1.6;
   const cells = new Array<number>(w * h);
@@ -107,13 +148,22 @@ function pixelizeMystery(src: SourceRaster, w: number, h: number, s: MosaicSetti
       const idx = [y * 2 * W2 + x * 2, y * 2 * W2 + x * 2 + 1, (y * 2 + 1) * W2 + x * 2, (y * 2 + 1) * W2 + x * 2 + 1];
       const bias = s.dither ? carry[y * w + x] : 0;
       let mean = 0;
+      let gone = 0;
       for (let i = 0; i < 4; i++) {
         const o = idx[i] * 3;
         const l = 0.2126 * pts[o] + 0.7152 * pts[o + 1] + 0.0722 * pts[o + 2];
         let d = 1 - l; // darkness
         if (s.invert) d = 1 - d;
-        q[i] = Math.max(0, Math.min(1, 0.5 + (d - (1 - t)) * gain + bias));
+        // A removed quarter is blank, so shapes can follow the edge of the cut-out.
+        if (removed?.[idx[i]]) {
+          q[i] = 0;
+          gone++;
+        } else q[i] = Math.max(0, Math.min(1, 0.5 + (d - (1 - t)) * gain + bias));
         mean += q[i] / 4;
+      }
+      if (gone === 4) {
+        cells[y * w + x] = 0;
+        continue;
       }
       let best = 0;
       let bestErr = Infinity;

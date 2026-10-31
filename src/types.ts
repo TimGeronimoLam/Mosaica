@@ -1,3 +1,6 @@
+import type { CellEdits } from './lib/edits';
+import type { StoredMask } from './lib/mask';
+
 /** Identifiers of the puzzle modes Mosaica can generate. */
 export type ModeId =
   | 'nonogram'
@@ -20,7 +23,12 @@ export interface MosaicSettings {
   gridWidth: number;
   gridHeight: number;
   lockAspect: boolean;
-  /** Crop: zoom factor (1 = whole image, cover-fit) and centre point in 0..1. */
+  /** Photo orientation: quarter turns clockwise (0..3), mirroring and a fine straighten angle (-45..45°). */
+  rotate: number;
+  flipH: boolean;
+  flipV: boolean;
+  straighten: number;
+  /** Crop: zoom factor (1 = whole image, cover-fit) and centre point in 0..1 of the transformed photo. */
   zoom: number;
   cx: number;
   cy: number;
@@ -28,6 +36,16 @@ export interface MosaicSettings {
   brightness: number;
   contrast: number;
   saturation: number;
+  /** Photo clean-up. autoLevels stretches the tones of the crop to the full range. */
+  autoLevels: boolean;
+  /** 0..100: remove uneven lighting (shadows across a face) while keeping detail. */
+  localContrast: number;
+  /** 0..100: flatten textures with an edge-preserving filter. */
+  smooth: number;
+  /** 0..100: keep thin dark features (eyes, lines) that averaging would lose. */
+  darkDetails: number;
+  /** 0..100: darken strong edges so outlines show. */
+  outlines: number;
   /** Binary modes: luminance cut 0..100 (cells darker than this are filled). */
   threshold: number;
   invert: boolean;
@@ -185,6 +203,7 @@ export type Puzzle =
 
 /* ---------- Persistence ---------- */
 
+
 export interface MosaicRecord {
   id: string;
   title: string;
@@ -200,6 +219,10 @@ export interface MosaicRecord {
   puzzle: Puzzle;
   /** PNG data URL of the pixel art, for the gallery. */
   thumbnail: string;
+  /** Background removed from the photo (in original image coordinates). */
+  mask?: StoredMask;
+  /** Cells touched up by hand on top of the automatic pixel art. */
+  edits?: CellEdits;
 }
 
 export type PaperSize = 'A4' | 'Letter';

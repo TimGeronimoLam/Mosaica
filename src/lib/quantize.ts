@@ -110,12 +110,15 @@ export function kmeans(points: Float32Array, k: number, rng: Rng, iterations = 2
   };
 }
 
-/** Nearest palette index for each point, with Floyd–Steinberg error diffusion. */
-export function ditherAssign(points: Float32Array, w: number, h: number, palette: Center[]): number[] {
+/**
+ * Nearest palette index for each point, with Floyd–Steinberg error diffusion.
+ * Cells flagged in `skip` get index 0 and neither take nor pass on error.
+ */
+export function ditherAssign(points: Float32Array, w: number, h: number, palette: Center[], skip?: Uint8Array | null): number[] {
   const buf = Float32Array.from(points);
   const labels = new Array<number>(w * h).fill(0);
   const add = (x: number, y: number, er: number, eg: number, eb: number, f: number) => {
-    if (x < 0 || x >= w || y < 0 || y >= h) return;
+    if (x < 0 || x >= w || y < 0 || y >= h || skip?.[y * w + x]) return;
     const o = (y * w + x) * 3;
     buf[o] += er * f;
     buf[o + 1] += eg * f;
@@ -125,6 +128,7 @@ export function ditherAssign(points: Float32Array, w: number, h: number, palette
     const ltr = y % 2 === 0;
     for (let k = 0; k < w; k++) {
       const x = ltr ? k : w - 1 - k;
+      if (skip?.[y * w + x]) continue;
       const o = (y * w + x) * 3;
       const r = buf[o];
       const g = buf[o + 1];
