@@ -2,16 +2,21 @@ import type { MosaicSettings } from '../types';
 import { bufferToOklab } from './color';
 import { clamp01, cropRect, type SourceRaster } from './image';
 
-/** Cell colours (w*h*3, sRGB 0..1) plus which cells were removed as background. */
+/**
+ * Cell colours (w*h*3, sRGB 0..1), which cells were removed as background, and
+ * how much of each cell (0..1) is marked as detail to protect.
+ */
 export interface Sampled {
   rgb: Float32Array;
   removed: Uint8Array | null;
+  detail: Float32Array | null;
 }
 
 export type CleanupSettings = Pick<
   MosaicSettings,
   'crop' | 'zoom' | 'cx' | 'cy' | 'brightness' | 'contrast' | 'saturation' | 'autoLevels' | 'localContrast' | 'smooth' | 'darkDetails' | 'outlines' | 'cellColor'
->;
+> &
+  Partial<Pick<MosaicSettings, 'restoreContrast'>>;
 
 const lum = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
@@ -24,22 +29,25 @@ const lum = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.072
  * With all of them off, each cell is a plain average of its source pixels:
  * exactly what mosaics made before these options got.
  *
- * `mask` (same size as the photo, 1 = background) marks cells to leave blank.
+ * `mask` (same size as the photo, 1 = background) marks cells to leave blank;
+ * `detailMask` (same size, 1 = detail) marks areas whose contrast and small
+ * features the converter protects.
  */
-export function sampleGrid(src: SourceRaster, w: number, h: number, s: CleanupSettings, mask?: Uint8Array | null): Sampled {
+export function sampleGrid(src: SourceRaster, w: number, h: number, s: CleanupSettings, mask?: Uint8Array | null, detailMask?: Uint8Array | null): Sampled {
   const rect = cropRect(src, w, h, s);
-  const detail = s.localContrast > 0 || s.smooth > 0 || s.darkDetails > 0 || s.outlines > 0 || s.cellColor === 'main';
+  const detail = s.localContrast > 0 || s.smooth > 0 || s.darkDetails > 0 || s.outlines > 0 || s.cellColor === 'main' || (s.restoreContrast ?? 0) > 0 || !!detailMask;
   const S = detail ? Math.max(1, Math.min(4, Math.floor(Math.min(rect.w / w, rect.h / h)))) : 1;
   const { rgb, cover } = resampleArea(src, rect, w * S, h * S, mask ?? null);
-  return finish(rgb, cover, w, h, S, s);
+  const want = detailMask ? resampleCoverage(detailMask, src.width, src.height, rect, w * S, h * S) : null;
+  return finish(rgb, cover, want, w, h, S, s);
 }
 
 /**
  * Like sampleGrid, for a crop that has already been rendered at S x S pixels
- * per cell (w*S x h*S) straight from the full-resolution photo. `mask` is the
- * background mask at that same size.
+ * per cell (w*S x h*S) straight from the full-resolution photo. `mask` and
+ * `detailMask` are the background and detail masks at that same size.
  */
-export function sampleCells(src: SourceRaster, w: number, h: number, S: number, s: CleanupSettings, mask?: Uint8Array | null): Sampled {
+export function sampleCells(src: SourceRaster, w: number, h: number, S: number, s: CleanupSettings, mask?: Uint8Array | null, detailMask?: Uint8Array | null): Sampled {
   const n = w * S * h * S;
   const rgb = new Float32Array(n * 3);
   const { data } = src;
@@ -49,16 +57,11 @@ export function sampleCells(src: SourceRaster, w: number, h: number, S: number, 
     rgb[i * 3 + 1] = (data[i * 4 + 1] * a + 255 * (1 - a)) / 255;
     rgb[i * 3 + 2] = (data[i * 4 + 2] * a + 255 * (1 - a)) / 255;
   }
-  let cover: Float32Array | null = null;
-  if (mask) {
-    cover = new Float32Array(n);
-    for (let i = 0; i < n; i++) cover[i] = mask[i];
-  }
-  return finish(rgb, cover, w, h, S, s);
+  return finish(rgb, mask ? Float32Array.from(mask) : null, detailMask ? Float32Array.from(detailMask) : null, w, h, S, s);
 }
 
 /** Tone, filters, then reduce S x S blocks to cells. */
-function finish(rgb: Float32Array, cover: Float32Array | null, w: number, h: number, S: number, s: CleanupSettings): Sampled {
+function finish(rgb: Float32Array, cover: Float32Array | null, want: Float32Array | null, w: number, h: number, S: number, s: CleanupSettings): Sampled {
   const W = w * S;
   const H = h * S;
   tone(rgb, cover, s);
@@ -66,24 +69,188 @@ function finish(rgb: Float32Array, cover: Float32Array | null, w: number, h: num
   if (s.smooth > 0) kuwahara(rgb, W, H, Math.max(1, Math.round((s.smooth / 100) * 1.5 * S)));
   if (s.outlines > 0) drawOutlines(rgb, W, H, s.outlines / 100, Math.max(1, Math.round(S / 2)));
   for (let i = 0; i < rgb.length; i++) rgb[i] = clamp01(rgb[i]);
-  const out = S === 1 ? rgb : downsample(rgb, W, H, S, s.darkDetails / 100, s.cellColor === 'main', cover);
+  let detail = want ? cellShare(want, w, h, S) : null;
+  if (detail && !detail.some((v) => v > 0)) detail = null;
+  const out = S === 1 ? rgb : downsample(rgb, W, H, S, s.darkDetails / 100, s.cellColor === 'main', cover, detail);
+  const amount = Math.max(0, Math.min(100, s.restoreContrast ?? 0)) / 100;
+  if (S > 1 && (amount > 0 || detail)) restoreContrast(out, rgb, W, H, S, amount, cover, detail);
   let removed: Uint8Array | null = null;
   if (cover) {
+    const share = cellShare(cover, w, h, S);
     removed = new Uint8Array(w * h);
     let any = false;
-    for (let gy = 0; gy < h; gy++) {
-      for (let gx = 0; gx < w; gx++) {
-        let c = 0;
-        for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) c += cover[(gy * S + y) * W + gx * S + x];
-        if (c / (S * S) >= 0.5) {
-          removed[gy * w + gx] = 1;
-          any = true;
-        }
+    for (let i = 0; i < share.length; i++) {
+      if (share[i] >= 0.5) {
+        removed[i] = 1;
+        any = true;
       }
     }
     if (!any) removed = null;
   }
-  return { rgb: out, removed };
+  return { rgb: out, removed, detail };
+}
+
+/** Share of each cell's S x S samples flagged in `flags` (values 0..1). */
+function cellShare(flags: Float32Array, w: number, h: number, S: number): Float32Array {
+  const W = w * S;
+  const out = new Float32Array(w * h);
+  for (let gy = 0; gy < h; gy++) {
+    for (let gx = 0; gx < w; gx++) {
+      let c = 0;
+      for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) c += flags[(gy * S + y) * W + gx * S + x];
+      out[gy * w + gx] = c / (S * S);
+    }
+  }
+  return out;
+}
+
+/** Share of each W x H block of the crop rectangle covered by set pixels of `mask` (sw x sh, the photo's size). */
+function resampleCoverage(mask: Uint8Array, sw: number, sh: number, rect: { x: number; y: number; w: number; h: number }, W: number, H: number): Float32Array {
+  const out = new Float32Array(W * H);
+  const cellW = rect.w / W;
+  const cellH = rect.h / H;
+  for (let gy = 0; gy < H; gy++) {
+    const y0 = Math.floor(rect.y + gy * cellH);
+    const y1 = Math.max(y0 + 1, Math.floor(rect.y + (gy + 1) * cellH));
+    for (let gx = 0; gx < W; gx++) {
+      const x0 = Math.floor(rect.x + gx * cellW);
+      const x1 = Math.max(x0 + 1, Math.floor(rect.x + (gx + 1) * cellW));
+      let m = 0;
+      let n = 0;
+      for (let y = Math.max(0, y0); y < y1 && y < sh; y++) {
+        for (let x = Math.max(0, x0); x < x1 && x < sw; x++) {
+          if (mask[y * sw + x]) m++;
+          n++;
+        }
+      }
+      out[gy * W + gx] = n ? m / n : 0;
+    }
+  }
+  return out;
+}
+
+/** Most a neighbourhood's contrast is scaled up by, so photo noise cannot blow up. */
+const RESTORE_MAX = 4;
+
+/**
+ * Perceptual downscaling (Öztireli & Gross 2015) in closed form, applied to
+ * cells already reduced from S x S samples.
+ *
+ * Averaging a whole cell loses the contrast of anything thinner than a cell:
+ * an eye becomes a slightly darker patch of skin, a whisker vanishes. For
+ * every 3 x 3 neighbourhood of cells this compares how much the samples vary
+ * with how much the cell colours vary, and scales the cells' deviations from
+ * their local mean up until the two match, so the cells carry the contrast the
+ * samples had. Smooth areas are left as they are.
+ *
+ * `amount` blends between the plain cells (0) and the restored ones (1);
+ * `importance` (per cell, 0..1) raises the amount to 1 where a cell is marked
+ * as detail. Removed cells (`cover`) are left alone and left out of the
+ * neighbourhoods.
+ */
+export function restoreContrast(
+  cells: Float32Array,
+  rgb: Float32Array,
+  W: number,
+  H: number,
+  S: number,
+  amount: number,
+  cover: Float32Array | null = null,
+  importance: Float32Array | null = null,
+): void {
+  const w = W / S;
+  const h = H / S;
+  const n = w * h;
+  // Mean of squares per cell over the kept samples, and which cells take part.
+  const sq = new Float32Array(n * 3);
+  const ok = new Uint8Array(n);
+  for (let gy = 0; gy < h; gy++) {
+    for (let gx = 0; gx < w; gx++) {
+      const i = gy * w + gx;
+      let count = 0;
+      for (let y = 0; y < S; y++) {
+        for (let x = 0; x < S; x++) {
+          const p = (gy * S + y) * W + gx * S + x;
+          if (cover && cover[p] >= 0.5) continue;
+          count++;
+          sq[i * 3] += rgb[p * 3] * rgb[p * 3];
+          sq[i * 3 + 1] += rgb[p * 3 + 1] * rgb[p * 3 + 1];
+          sq[i * 3 + 2] += rgb[p * 3 + 2] * rgb[p * 3 + 2];
+        }
+      }
+      if (count * 2 <= S * S) continue;
+      ok[i] = 1;
+      sq[i * 3] /= count;
+      sq[i * 3 + 1] /= count;
+      sq[i * 3 + 2] /= count;
+    }
+  }
+  const M = new Float32Array(n);
+  const R = new Float32Array(n);
+  const D = new Float32Array(n);
+  for (let c = 0; c < 3; c++) {
+    // Local mean of the cells and the ratio of sample spread to cell spread.
+    for (let gy = 0; gy < h; gy++) {
+      for (let gx = 0; gx < w; gx++) {
+        const i = gy * w + gx;
+        if (!ok[i]) continue;
+        let cnt = 0;
+        let sum = 0;
+        let sum2 = 0;
+        let sumq = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const y = gy + dy;
+          if (y < 0 || y >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const x = gx + dx;
+            if (x < 0 || x >= w) continue;
+            const j = y * w + x;
+            if (!ok[j]) continue;
+            const v = cells[j * 3 + c];
+            cnt++;
+            sum += v;
+            sum2 += v * v;
+            sumq += sq[j * 3 + c];
+          }
+        }
+        const m = sum / cnt;
+        const sl = sum2 / cnt - m * m;
+        const sh = sumq / cnt - m * m;
+        M[i] = m;
+        R[i] = sl > 1e-6 ? Math.min(RESTORE_MAX, Math.sqrt(Math.max(0, sh) / sl)) : 1;
+      }
+    }
+    // Each cell's restored value, averaged over the neighbourhoods it belongs to.
+    for (let gy = 0; gy < h; gy++) {
+      for (let gx = 0; gx < w; gx++) {
+        const i = gy * w + gx;
+        if (!ok[i]) continue;
+        const v = cells[i * 3 + c];
+        let cnt = 0;
+        let acc = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const y = gy + dy;
+          if (y < 0 || y >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const x = gx + dx;
+            if (x < 0 || x >= w) continue;
+            const j = y * w + x;
+            if (!ok[j]) continue;
+            cnt++;
+            acc += M[j] + R[j] * (v - M[j]);
+          }
+        }
+        D[i] = acc / cnt;
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      if (!ok[i]) continue;
+      const a = Math.max(amount, importance ? importance[i] : 0);
+      if (a <= 0) continue;
+      const v = cells[i * 3 + c];
+      cells[i * 3 + c] = clamp01(v + a * (D[i] - v));
+    }
+  }
 }
 
 /** Box-average the crop rectangle down (or up) to W x H pixels. */
@@ -394,17 +561,29 @@ export function drawOutlines(rgb: Float32Array, W: number, H: number, k: number,
  * stay smooth. `dark` makes the darker side win close calls.
  *
  * Samples flagged in `cover` (removed background) are ignored unless the whole
- * cell is removed.
+ * cell is removed. `importance` (per cell, 0..1) raises `dark` for cells marked
+ * as detail, so an eye keeps its darkness even with the slider low.
  */
-export function downsample(rgb: Float32Array, W: number, H: number, S: number, dark: number, main = false, cover: Float32Array | null = null): Float32Array {
+export function downsample(
+  rgb: Float32Array,
+  W: number,
+  H: number,
+  S: number,
+  dark: number,
+  main = false,
+  cover: Float32Array | null = null,
+  importance: Float32Array | null = null,
+): Float32Array {
   const w = W / S;
   const h = H / S;
   const out = new Float32Array(w * h * 3);
   const lab = main ? bufferToOklab(rgb) : null;
   const all = new Int32Array(S * S);
   const assign = new Uint8Array(S * S);
+  const baseDark = dark;
   for (let gy = 0; gy < h; gy++) {
     for (let gx = 0; gx < w; gx++) {
+      const dark = importance ? Math.min(1, baseDark + importance[gy * w + gx] * (1 - baseDark) * 0.6) : baseDark;
       let count = 0;
       for (let y = 0; y < S; y++) {
         for (let x = 0; x < S; x++) {

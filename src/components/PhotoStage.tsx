@@ -1,22 +1,30 @@
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { CROP_RATIOS, dragHandle, moveBox, scaleBox, spanBox, type CropBox, type CropRatio, type Handle } from '../lib/crop';
 import type { CropRect, SourceRaster, TransformedPhoto } from '../lib/image';
-import { combineMask, emptyMask, invertMask, maskCoverage, normalizeMask, paintSegment, renderMaskOverlay, selectBackground, selectSimilar, type Box, type PhotoMask } from '../lib/mask';
+import { combineMask, emptyMask, invertMask, maskCoverage, normalizeMask, paintSegment, renderMaskOverlay, selectBackground, selectSimilar, type Box, type OverlayLook, type PhotoMask } from '../lib/mask';
+import { findFaceDetails } from '../lib/ai/face';
+import { findSubject, SUBJECT_MODELS, type SubjectModel } from '../lib/ai/segment';
 import { apply, invert, multiply, scaleOf, scaling, type Affine } from '../lib/transform';
 import { IconBrush, IconCrop, IconInvert, IconSparkles, IconTrash, IconWand } from './Icons';
 import { capture, Segmented, Slider } from './ui';
 
+/** Which mask the brush and wand paint: the removed background, or the detail to protect. */
+export type MaskLayer = 'background' | 'detail';
+
 export interface PhotoTools {
   tool: 'crop' | 'brush' | 'wand';
-  /** Brush and wand remove background (true) or bring it back (false). */
+  layer: MaskLayer;
+  /** Brush and wand set the mask (remove background / mark detail) or clear it. */
   erase: boolean;
   /** Brush radius in grid cells. */
   brush: number;
   /** Wand and auto-background colour tolerance, 0..100. */
   tolerance: number;
+  /** Which neural network "Find the subject" uses. */
+  subjectModel: SubjectModel;
 }
 
-export const DEFAULT_PHOTO_TOOLS: PhotoTools = { tool: 'crop', erase: true, brush: 1.5, tolerance: 30 };
+export const DEFAULT_PHOTO_TOOLS: PhotoTools = { tool: 'crop', layer: 'background', erase: true, brush: 1.5, tolerance: 30, subjectModel: 'portrait' };
 
 /** Maps pixels of the transformed photo to pixels of a mask of the given size. */
 export function photoToMask(photo: TransformedPhoto, maskWidth: number, maskHeight: number): Affine {
@@ -25,8 +33,8 @@ export function photoToMask(photo: TransformedPhoto, maskWidth: number, maskHeig
 
 const FULL = (w: number, h: number): Box => ({ x0: 0, y0: 0, x1: w - 1, y1: h - 1 });
 
-/** Draw the removed areas of `mask` over a canvas the size of the photo. */
-function paintOverlay(canvas: HTMLCanvasElement, mask: PhotoMask | null, toMask: Affine, box?: Box): void {
+/** Draw the set areas of `mask` over a canvas the size of the photo. */
+function paintOverlay(canvas: HTMLCanvasElement, mask: PhotoMask | null, toMask: Affine, look: OverlayLook, box?: Box): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   const { width: W, height: H } = canvas;
@@ -37,25 +45,30 @@ function paintOverlay(canvas: HTMLCanvasElement, mask: PhotoMask | null, toMask:
   const img = ctx.createImageData(bw, bh);
   // Render into a buffer as wide as the box, so shift the mapping to the box origin.
   const shifted = multiply(toMask, [1, 0, 0, 1, b.x0, b.y0]);
-  renderMaskOverlay(img.data, bw, mask, shifted, { x0: 0, y0: 0, x1: bw - 1, y1: bh - 1 });
+  renderMaskOverlay(img.data, bw, mask, shifted, { x0: 0, y0: 0, x1: bw - 1, y1: bh - 1 }, look);
   ctx.putImageData(img, b.x0, b.y0);
 }
 
-/** The photo with its removed background, as a small picture (sidebar). */
-export function PhotoThumb({ photo, mask, toMask, crop }: { photo: TransformedPhoto; mask: PhotoMask | null; toMask: Affine; crop: CropRect }) {
+/** The photo with its removed background and detail areas, as a small picture (sidebar). */
+export function PhotoThumb({ photo, mask, detail, toMask, crop }: { photo: TransformedPhoto; mask: PhotoMask | null; detail?: PhotoMask | null; toMask: Affine; crop: CropRect }) {
   const img = useRef<HTMLCanvasElement>(null);
   const ov = useRef<HTMLCanvasElement>(null);
+  const dt = useRef<HTMLCanvasElement>(null);
   const { width: W, height: H } = photo.raster;
   useLayoutEffect(() => {
     img.current?.getContext('2d')?.drawImage(photo.canvas, 0, 0);
   }, [photo]);
   useLayoutEffect(() => {
-    if (ov.current) paintOverlay(ov.current, mask, toMask);
+    if (ov.current) paintOverlay(ov.current, mask, toMask, 'removed');
   }, [photo, mask, toMask]);
+  useLayoutEffect(() => {
+    if (dt.current) paintOverlay(dt.current, detail ?? null, toMask, 'detail');
+  }, [photo, detail, toMask]);
   return (
     <div className="crop-preview" style={{ aspectRatio: `${W} / ${H}`, width: `min(100%, ${Math.round((320 * W) / H)}px)` }}>
       <canvas ref={img} width={W} height={H} />
       <canvas ref={ov} width={W} height={H} className="mask-layer" />
+      <canvas ref={dt} width={W} height={H} className="mask-layer" />
       <div className="crop-box" style={cropStyle(crop, W, H)} />
     </div>
   );
@@ -68,6 +81,8 @@ function cropStyle(crop: CropRect, W: number, H: number) {
 interface StageProps {
   photo: TransformedPhoto;
   mask: PhotoMask | null;
+  /** Areas to protect as detail, in the same coordinates as `mask`. */
+  detail: PhotoMask | null;
   /** The untransformed photo at mask resolution, for the wand. */
   maskBase: SourceRaster;
   /** The crop, as fractions of the photo. */
@@ -82,6 +97,7 @@ interface StageProps {
   tools: PhotoTools;
   onCrop: (box: CropBox) => void;
   onMask: (m: PhotoMask | null) => void;
+  onDetail: (m: PhotoMask | null) => void;
 }
 
 type CropHit = Handle | 'move' | 'new';
@@ -89,7 +105,9 @@ type CropHit = Handle | 'move' | 'new';
 type Gesture =
   | { kind: 'crop'; hit: CropHit; start: CropBox; x: number; y: number; moved: boolean }
   | { kind: 'pinch'; dist: number; start: CropBox }
-  | { kind: 'brush'; data: Uint8Array; last: [number, number] };
+  | { kind: 'brush'; layer: MaskLayer; data: Uint8Array; last: [number, number] };
+
+const LOOK: Record<MaskLayer, OverlayLook> = { background: 'removed', detail: 'detail' };
 
 const CORNERS: Handle[] = ['nw', 'ne', 'sw', 'se'];
 const EDGES: Handle[] = ['n', 's', 'e', 'w'];
@@ -111,10 +129,14 @@ function handleAt(h: Handle): [number, number] {
   return [h.includes('w') ? 0 : h.includes('e') ? 1 : 0.5, h.includes('n') ? 0 : h.includes('s') ? 1 : 0.5];
 }
 
-export function PhotoStage({ photo, mask, maskBase, box, ratio, gridWidth, gridHeight, cellSize, displayWidth, tools, onCrop, onMask }: StageProps) {
+export function PhotoStage({ photo, mask, detail, maskBase, box, ratio, gridWidth, gridHeight, cellSize, displayWidth, tools, onCrop, onMask, onDetail }: StageProps) {
   const stage = useRef<HTMLDivElement>(null);
   const imgCanvas = useRef<HTMLCanvasElement>(null);
   const ovCanvas = useRef<HTMLCanvasElement>(null);
+  const dtCanvas = useRef<HTMLCanvasElement>(null);
+  const layerCanvas = { background: ovCanvas, detail: dtCanvas };
+  const layerMask = { background: mask, detail };
+  const setLayer = { background: onMask, detail: onDetail };
   const pointers = useRef(new Map<number, [number, number]>());
   const gesture = useRef<Gesture | null>(null);
   const [hover, setHover] = useState<[number, number] | null>(null);
@@ -135,8 +157,12 @@ export function PhotoStage({ photo, mask, maskBase, box, ratio, gridWidth, gridH
   }, [photo]);
 
   useLayoutEffect(() => {
-    if (ovCanvas.current) paintOverlay(ovCanvas.current, mask, photoToMask(photo, mw, mh));
+    if (ovCanvas.current) paintOverlay(ovCanvas.current, mask, photoToMask(photo, mw, mh), 'removed');
   }, [photo, mask, mw, mh]);
+
+  useLayoutEffect(() => {
+    if (dtCanvas.current) paintOverlay(dtCanvas.current, detail, photoToMask(photo, mw, mh), 'detail');
+  }, [photo, detail, mw, mh]);
 
   // Ctrl/⌘ + wheel (and trackpad pinch, which arrives as ctrl+wheel) resizes the crop around its centre.
   const boxRef = useRef(box);
@@ -183,7 +209,8 @@ export function PhotoStage({ photo, mask, maskBase, box, ratio, gridWidth, gridH
     const b = apply(toMask, p[0], p[1]);
     const box = paintSegment(g.data, mw, mh, a[0], a[1], b[0], b[1], brushPx * scaleOf(toMask), tools.erase ? 1 : 0);
     g.last = p;
-    if (!box || !ovCanvas.current) return;
+    const canvas = layerCanvas[g.layer].current;
+    if (!box || !canvas) return;
     // The changed mask box, mapped back to photo pixels.
     const corners = [
       apply(toPhoto, box.x0, box.y0),
@@ -193,7 +220,7 @@ export function PhotoStage({ photo, mask, maskBase, box, ratio, gridWidth, gridH
     ];
     const xs = corners.map((c) => c[0]);
     const ys = corners.map((c) => c[1]);
-    paintOverlay(ovCanvas.current, { width: mw, height: mh, data: g.data }, toMask, {
+    paintOverlay(canvas, { width: mw, height: mh, data: g.data }, toMask, LOOK[g.layer], {
       x0: Math.max(0, Math.floor(Math.min(...xs)) - 1),
       y0: Math.max(0, Math.floor(Math.min(...ys)) - 1),
       x1: Math.min(W - 1, Math.ceil(Math.max(...xs)) + 1),
@@ -219,14 +246,15 @@ export function PhotoStage({ photo, mask, maskBase, box, ratio, gridWidth, gridH
       setDragging(true);
       return;
     }
+    const current = layerMask[tools.layer];
     if (tools.tool === 'wand') {
       const [mx, my] = apply(toMask, p[0], p[1]);
       if (mx < 0 || my < 0 || mx >= mw || my >= mh) return;
       const region = selectSimilar(maskBase, mx, my, tools.tolerance);
-      onMask(normalizeMask(combineMask(mask, region, tools.erase ? 1 : 0, mw, mh)));
+      setLayer[tools.layer](normalizeMask(combineMask(current, region, tools.erase ? 1 : 0, mw, mh)));
       return;
     }
-    const g: Gesture = { kind: 'brush', data: mask ? mask.data.slice() : emptyMask(mw, mh).data, last: p };
+    const g: Gesture = { kind: 'brush', layer: tools.layer, data: current ? current.data.slice() : emptyMask(mw, mh).data, last: p };
     gesture.current = g;
     strokeTo(g, p);
   };
@@ -265,7 +293,7 @@ export function PhotoStage({ photo, mask, maskBase, box, ratio, gridWidth, gridH
     // Fingers do not hover, so do not leave the brush ring behind.
     if (e.pointerType !== 'mouse') setHover(null);
     const g = gesture.current;
-    if (g?.kind === 'brush') onMask(normalizeMask({ width: mw, height: mh, data: g.data }));
+    if (g?.kind === 'brush') setLayer[g.layer](normalizeMask({ width: mw, height: mh, data: g.data }));
     gesture.current = null;
     setDragging(false);
     // Lifting one finger of a pinch carries on as a move with the other.
@@ -295,6 +323,7 @@ export function PhotoStage({ photo, mask, maskBase, box, ratio, gridWidth, gridH
     >
       <canvas ref={imgCanvas} width={W} height={H} />
       <canvas ref={ovCanvas} width={W} height={H} className="mask-layer" />
+      <canvas ref={dtCanvas} width={W} height={H} className="mask-layer" />
       <div
         className={`crop-frame ${tools.tool === 'crop' ? 'active' : 'faint'}`}
         style={{ left: box.x * displayWidth, top: box.y * displayHeight, width: box.w * displayWidth, height: box.h * displayHeight }}
@@ -317,7 +346,7 @@ export function PhotoStage({ photo, mask, maskBase, box, ratio, gridWidth, gridH
       </div>
       {hover && tools.tool === 'brush' && (
         <div
-          className={`brush-cursor ${tools.erase ? 'erase' : 'keep'}`}
+          className={`brush-cursor ${tools.layer === 'detail' ? (tools.erase ? 'mark' : 'unmark') : tools.erase ? 'erase' : 'keep'}`}
           style={{ left: hover[0] * scale, top: hover[1] * scale, width: brushPx * 2 * scale, height: brushPx * 2 * scale }}
         />
       )}
@@ -329,6 +358,7 @@ interface ToolbarProps {
   tools: PhotoTools;
   onTools: (patch: Partial<PhotoTools>) => void;
   mask: PhotoMask | null;
+  detail: PhotoMask | null;
   maskBase: SourceRaster;
   cropRatio: CropRatio;
   /** False when the grid size is fixed by hand, so the crop has to keep the grid's shape. */
@@ -336,14 +366,60 @@ interface ToolbarProps {
   onRatio: (r: CropRatio) => void;
   onResetCrop: () => void;
   onMask: (m: PhotoMask | null) => void;
+  onDetail: (m: PhotoMask | null) => void;
 }
 
-export function PhotoToolbar({ tools, onTools, mask, maskBase, cropRatio, ratioFree, onRatio, onResetCrop, onMask }: ToolbarProps) {
+/** A neural network running on the photo: what it is doing, or what went wrong. */
+type AiState = { status: 'idle' } | { status: 'busy'; message: string } | { status: 'error'; message: string };
+
+export function PhotoToolbar({ tools, onTools, mask, detail, maskBase, cropRatio, ratioFree, onRatio, onResetCrop, onMask, onDetail }: ToolbarProps) {
   const mw = maskBase.width;
   const mh = maskBase.height;
   const removed = maskCoverage(mask);
+  const marked = maskCoverage(detail);
   const [notice, setNotice] = useState<string | null>(null);
-  useEffect(() => setNotice(null), [tools.tool, tools.erase]);
+  const [ai, setAi] = useState<AiState>({ status: 'idle' });
+  useEffect(() => setNotice(null), [tools.tool, tools.erase, tools.layer]);
+  // Results of a run that finishes after the toolbar is gone are dropped.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const runAi = async (job: (progress: (m: string) => void) => Promise<string | null>) => {
+    setNotice(null);
+    setAi({ status: 'busy', message: 'Starting…' });
+    try {
+      const note = await job((message) => alive.current && setAi({ status: 'busy', message }));
+      if (!alive.current) return;
+      setAi({ status: 'idle' });
+      setNotice(note);
+    } catch (e) {
+      if (!alive.current) return;
+      const text = e instanceof Error ? e.message : String(e);
+      setAi({ status: 'error', message: /fetch|network|load/i.test(text) ? `Could not load the model (is the device online?). ${text}` : text });
+    }
+  };
+  const aiSubject = () =>
+    runAi(async (progress) => {
+      const region = await findSubject(maskBase, tools.subjectModel, progress);
+      const share = region.reduce((a, v) => a + v, 0) / region.length;
+      if (share === 0) return 'The model found no background to remove.';
+      if (share > 0.98) return 'The model found no subject in this photo. Try the other model, or the brush.';
+      // The model decides the whole mask: what it keeps overrides earlier removals.
+      onMask(normalizeMask({ width: mw, height: mh, data: region }));
+      return null;
+    });
+  const aiFace = () =>
+    runAi(async (progress) => {
+      const found = await findFaceDetails(maskBase, progress);
+      if (!found.faces) return 'No face found. Mark the important parts with the brush instead.';
+      onDetail(normalizeMask(combineMask(detail, found.mask, 1, mw, mh)));
+      return `Marked the eyes, brows, nose and mouth of ${found.faces === 1 ? 'one face' : `${found.faces} faces`}.`;
+    });
+  const busy = ai.status === 'busy';
   const autoBackground = () => {
     const region = selectBackground(maskBase, tools.tolerance);
     const share = region.reduce((a, v) => a + v, 0) / region.length;
@@ -358,18 +434,27 @@ export function PhotoToolbar({ tools, onTools, mask, maskBase, cropRatio, ratioF
         : null,
     );
   };
+  const onDetailLayer = tools.layer === 'detail';
   const hint =
     tools.tool === 'crop'
       ? ratioFree
         ? 'Drag the corners or edges to crop, drag inside to move, or drag outside to draw a new crop. Pinch or Ctrl+scroll to resize.'
         : 'The crop keeps the grid’s shape because the grid height is set by hand (step 3). Drag the corners to resize, drag inside to move.'
-      : tools.tool === 'brush'
-        ? tools.erase
-          ? 'Paint over anything that should stay blank, like a busy background.'
-          : 'Paint over removed areas to bring them back.'
-        : tools.erase
-          ? 'Click an area to remove it and everything of a similar colour joined to it.'
-          : 'Click a removed area to bring it back.';
+      : onDetailLayer
+        ? tools.tool === 'brush'
+          ? tools.erase
+            ? 'Paint over the parts the picture is recognised by (eyes, mouth, a logo). They keep their contrast, their colours and their small features.'
+            : 'Paint over marked areas to unmark them.'
+          : tools.erase
+            ? 'Click an area to mark it and everything of a similar colour joined to it as detail.'
+            : 'Click a marked area to unmark it.'
+        : tools.tool === 'brush'
+          ? tools.erase
+            ? 'Paint over anything that should stay blank, like a busy background.'
+            : 'Paint over removed areas to bring them back.'
+          : tools.erase
+            ? 'Click an area to remove it and everything of a similar colour joined to it.'
+            : 'Click a removed area to bring it back.';
   return (
     <div className="stage-tools" role="toolbar" aria-label="Photo tools">
       <div className="tool-row">
@@ -385,13 +470,31 @@ export function PhotoToolbar({ tools, onTools, mask, maskBase, cropRatio, ratioF
         />
         {tools.tool !== 'crop' && (
           <Segmented
+            label="Layer"
+            value={tools.layer}
+            onChange={(layer) => onTools({ layer })}
+            options={[
+              { value: 'background', label: 'Background' },
+              { value: 'detail', label: 'Detail' },
+            ]}
+          />
+        )}
+        {tools.tool !== 'crop' && (
+          <Segmented
             label="Brush mode"
             value={tools.erase ? 'erase' : 'keep'}
             onChange={(v) => onTools({ erase: v === 'erase' })}
-            options={[
-              { value: 'erase', label: 'Remove' },
-              { value: 'keep', label: 'Keep' },
-            ]}
+            options={
+              onDetailLayer
+                ? [
+                    { value: 'erase', label: 'Mark' },
+                    { value: 'keep', label: 'Unmark' },
+                  ]
+                : [
+                    { value: 'erase', label: 'Remove' },
+                    { value: 'keep', label: 'Keep' },
+                  ]
+            }
           />
         )}
         {tools.tool === 'crop' && (
@@ -416,22 +519,55 @@ export function PhotoToolbar({ tools, onTools, mask, maskBase, cropRatio, ratioF
           {tools.tool === 'brush' && <Slider label="Brush size" value={tools.brush} min={0.5} max={8} step={0.5} onChange={(brush) => onTools({ brush })} format={(v) => `${v} cells`} />}
         </div>
       </div>
-      <div className="tool-row">
-        <button className="btn small" onClick={autoBackground} title="Remove the plain background around the subject">
-          <IconSparkles size={16} /> Remove background
-        </button>
-        <div className="tool-slider">
-          <Slider label="Tolerance" value={tools.tolerance} min={1} max={100} onChange={(tolerance) => onTools({ tolerance })} format={(v) => (v < 20 ? `${v} · strict` : v > 60 ? `${v} · loose` : String(v))} />
+      {tools.tool !== 'crop' && onDetailLayer ? (
+        <div className="tool-row">
+          <button className="btn small" onClick={aiFace} disabled={busy} title="Find faces and mark their eyes, brows, nose and mouth (runs in your browser)">
+            <IconSparkles size={16} /> Find face details
+          </button>
+          <button className="btn small ghost" onClick={() => onDetail(null)} disabled={!detail}>
+            <IconTrash size={16} /> Clear
+          </button>
+          {marked > 0 && <span className="tool-note">{Math.round(marked * 100)}% marked</span>}
         </div>
-        <button className="btn small" onClick={() => onMask(normalizeMask(invertMask(mask, mw, mh)))} title="Swap removed and kept areas">
-          <IconInvert size={16} /> Invert
-        </button>
-        <button className="btn small ghost" onClick={() => onMask(null)} disabled={!mask}>
-          <IconTrash size={16} /> Clear
-        </button>
-        {removed > 0 && <span className="tool-note">{Math.round(removed * 100)}% removed</span>}
-      </div>
-      {notice ? (
+      ) : (
+        <>
+          <div className="tool-row">
+            <button className="btn small" onClick={autoBackground} disabled={busy} title="Remove the plain background around the subject (colour flood fill)">
+              <IconSparkles size={16} /> Remove plain background
+            </button>
+            <div className="tool-slider">
+              <Slider label="Tolerance" value={tools.tolerance} min={1} max={100} onChange={(tolerance) => onTools({ tolerance })} format={(v) => (v < 20 ? `${v} · strict` : v > 60 ? `${v} · loose` : String(v))} />
+            </div>
+            <button className="btn small" onClick={() => onMask(normalizeMask(invertMask(mask, mw, mh)))} title="Swap removed and kept areas">
+              <IconInvert size={16} /> Invert
+            </button>
+            <button className="btn small ghost" onClick={() => onMask(null)} disabled={!mask}>
+              <IconTrash size={16} /> Clear
+            </button>
+            {removed > 0 && <span className="tool-note">{Math.round(removed * 100)}% removed</span>}
+          </div>
+          <div className="tool-row">
+            <button className="btn small" onClick={aiSubject} disabled={busy} title="Let a neural network find the subject and remove everything else (runs in your browser; the model is downloaded once)">
+              <IconSparkles size={16} /> Find the subject
+            </button>
+            <label className="field inline">
+              <span>Model</span>
+              <select value={tools.subjectModel} disabled={busy} onChange={(e) => onTools({ subjectModel: e.target.value as SubjectModel })} title={SUBJECT_MODELS[tools.subjectModel].note}>
+                {(Object.keys(SUBJECT_MODELS) as SubjectModel[]).map((k) => (
+                  <option key={k} value={k}>
+                    {SUBJECT_MODELS[k].label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </>
+      )}
+      {ai.status !== 'idle' ? (
+        <p className={`hint ${ai.status === 'error' ? 'warn' : 'ai-busy'}`} role="status" aria-live="polite">
+          {ai.message}
+        </p>
+      ) : notice ? (
         <p className="hint warn" role="status">
           {notice}
         </p>

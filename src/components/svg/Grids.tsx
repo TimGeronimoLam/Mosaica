@@ -7,7 +7,7 @@ const PAD = 4;
 
 /* ---------------- Nonogram ---------------- */
 
-export function NonogramSvg({ puzzle, solution }: { puzzle: NonogramPuzzle; solution: boolean }) {
+export function NonogramSvg({ puzzle, solution, marks = [] }: { puzzle: NonogramPuzzle; solution: boolean; marks?: number[] }) {
   const { width, height, rows, cols, color, palette } = puzzle;
   const slot = 8;
   const maxRow = Math.max(1, ...rows.map((r) => r.length));
@@ -51,6 +51,13 @@ export function NonogramSvg({ puzzle, solution }: { puzzle: NonogramPuzzle; solu
       </g>
       {solution && <CellFills x={left} y={top} width={width} cells={puzzle.cells} palette={palette} blank />}
       <GridLines x={left} y={top} cols={width} rows={height} />
+      {marks.length > 0 && (
+        <g fill="none" stroke="#d6362a" strokeWidth={0.9}>
+          {marks.map((i) => (
+            <rect key={i} x={left + (i % width) * CELL + 0.6} y={top + Math.floor(i / width) * CELL + 0.6} width={CELL - 1.2} height={CELL - 1.2} rx={1} />
+          ))}
+        </g>
+      )}
       <g textAnchor="middle" dominantBaseline="central" fill="#111">
         {rows.map((r, y) =>
           r.map((c, i) => {

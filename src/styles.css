@@ -1285,6 +1285,29 @@ input[type='range']:focus-visible::-moz-range-thumb {
   min-width: 0;
 }
 
+.check {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 650;
+  white-space: nowrap;
+  background: #e8f5ea;
+  color: #1f6b33;
+}
+
+.check-guess,
+.check-unknown {
+  background: #fff4dd;
+  color: #7a5200;
+}
+
+.check-ambiguous {
+  background: #fff1f0;
+  color: #8a2a1f;
+}
+
 .busy {
   display: inline-flex;
   align-items: center;
@@ -2583,5 +2606,38 @@ input[type='range']:focus-visible::-moz-range-thumb {
   .sheet:not(:last-child) {
     page-break-after: always;
     break-after: page;
+  }
+}
+
+/* Detail layer (areas the converter protects) */
+.brush-cursor.mark {
+  background: rgba(46, 123, 228, 0.22);
+}
+
+.brush-cursor.unmark {
+  background: rgba(46, 123, 228, 0.08);
+  border-style: dashed;
+}
+
+.stage-tools .hint.ai-busy {
+  color: var(--accent-hover);
+}
+
+.stage-tools .hint.ai-busy::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 8px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  vertical-align: -1px;
+  animation: ai-spin 0.9s linear infinite;
+}
+
+@keyframes ai-spin {
+  to {
+    transform: rotate(360deg);
   }
 }

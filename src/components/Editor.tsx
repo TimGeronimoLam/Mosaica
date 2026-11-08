@@ -41,6 +41,7 @@ import {
 import { DEFAULT_PHOTO_TOOLS, PhotoStage, PhotoThumb, PhotoToolbar, photoToMask, type PhotoTools } from './PhotoStage';
 import { DEFAULT_PIXEL_TOOLS, PixelStage, PixelToolbar, type PixelTools } from './PixelStage';
 import { PuzzleSvg, puzzleSummary } from './PuzzleSvg';
+import { analyzeNonogram, type NonogramAnalysis } from '../lib/modes/nonogramSolver';
 import { Segmented, Slider, Toggle } from './ui';
 
 interface Source {
@@ -55,6 +56,8 @@ interface Doc {
   mode: ModeId;
   settings: MosaicSettings;
   mask: PhotoMask | null;
+  /** Areas marked as detail (eyes, mouth…) that the converter protects. */
+  detail: PhotoMask | null;
   edits: CellEdits | null;
 }
 
@@ -73,7 +76,7 @@ const handoff = new Map<
 const ZOOM_STEPS = [40, 50, 60, 75, 100, 125, 150, 200, 250, 300];
 
 /** Settings the clean-up "Reset" puts back. */
-const CLEANUP_DEFAULTS = { brightness: 0, contrast: 0, saturation: 0, autoLevels: false, localContrast: 0, smooth: 0, darkDetails: 0, outlines: 0 } satisfies Partial<MosaicSettings>;
+const CLEANUP_DEFAULTS = { brightness: 0, contrast: 0, saturation: 0, autoLevels: false, localContrast: 0, smooth: 0, darkDetails: 0, outlines: 0, restoreContrast: 0 } satisfies Partial<MosaicSettings>;
 
 function makeSource(blob: Blob, img: HTMLImageElement): Source {
   return { blob, img, maskBase: rasterize(img, MASK_MAX) };
@@ -86,7 +89,17 @@ function build(source: Source, d: Doc) {
   const toMask = photoToMask(photo, source.maskBase.width, source.maskBase.height);
   const legacy = effective.converter < 2;
   const photoMask = d.mask && legacy ? transformMask(d.mask, toMask, photo.raster.width, photo.raster.height) : null;
-  const sampler = makeSampler({ photo, settings: effective, mask: d.mask, toMask, photoMask, renderer: legacy ? null : createCropRenderer(source.img, photo) });
+  const photoDetail = d.detail && legacy ? transformMask(d.detail, toMask, photo.raster.width, photo.raster.height) : null;
+  const sampler = makeSampler({
+    photo,
+    settings: effective,
+    mask: d.mask,
+    detail: d.detail,
+    toMask,
+    photoMask,
+    photoDetail,
+    renderer: legacy ? null : createCropRenderer(source.img, photo),
+  });
   const grid = applyEdits(pixelize(sampler, effective, MODE_BY_ID[d.mode].kind(effective)), d.edits);
   return { effective, grid, puzzle: generatePuzzle(d.mode, grid, effective) };
 }
@@ -124,7 +137,7 @@ export function Editor({ id }: { id: string | null }) {
   const [loading, setLoading] = useState(!!id);
   const [error, setError] = useState<string | null>(null);
   const [title, setTitle] = useState('');
-  const history = useHistory<Doc>(() => ({ mode: 'colorByCode', settings: defaultSettings('colorByCode', randomSeed()), mask: null, edits: null }));
+  const history = useHistory<Doc>(() => ({ mode: 'colorByCode', settings: defaultSettings('colorByCode', randomSeed()), mask: null, detail: null, edits: null }));
   const doc = history.present;
   const { mode, settings } = doc;
   const setDoc = history.set;
@@ -176,6 +189,7 @@ export function Editor({ id }: { id: string | null }) {
             mode: rec.mode,
             settings: loadSettings(rec.mode, rec.settings),
             mask: rec.mask ? resizeMask(decodeMask(rec.mask), src.maskBase.width, src.maskBase.height) : null,
+            detail: rec.detail ? resizeMask(decodeMask(rec.detail), src.maskBase.width, src.maskBase.height) : null,
             edits: rec.edits ?? null,
           };
           history.reset(loaded);
@@ -209,6 +223,7 @@ export function Editor({ id }: { id: string | null }) {
   );
   const slide = (key: keyof MosaicSettings) => (v: number) => update({ [key]: v }, key);
   const setMask = useCallback((mask: PhotoMask | null) => setDoc((prev) => ({ ...prev, mask })), [setDoc]);
+  const setDetail = useCallback((detail: PhotoMask | null) => setDoc((prev) => ({ ...prev, detail })), [setDoc]);
   const setEdits = useCallback((edits: CellEdits | null) => setDoc((prev) => ({ ...prev, edits })), [setDoc]);
   const onCrop = useCallback((crop: MosaicSettings['crop']) => update({ crop }, 'crop'), [update]);
 
@@ -249,7 +264,7 @@ export function Editor({ id }: { id: string | null }) {
       const base: MosaicSettings = { ...settings, rotate: 0, flipH: false, flipV: false, straighten: 0, zoom: 1, cx: 0.5, cy: 0.5 };
       const A = photoAspect(img, base);
       const s = reconcile({ ...base, crop: largestBox(base.lockAspect ? ratioValue(base.cropRatio, A) : base.gridWidth / base.gridHeight, A) }, A);
-      history.reset({ mode, settings: normalizeSettings(mode, s), mask: null, edits: null });
+      history.reset({ mode, settings: normalizeSettings(mode, s), mask: null, detail: null, edits: null });
       if (!title) setTitle(file.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' '));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -269,15 +284,20 @@ export function Editor({ id }: { id: string | null }) {
     () => (legacy && photo && toMask && deferred.mask ? transformMask(deferred.mask, toMask, photo.raster.width, photo.raster.height) : null),
     [legacy, photo, toMask, deferred.mask],
   );
+  const photoDetail = useMemo(
+    () => (legacy && photo && toMask && deferred.detail ? transformMask(deferred.detail, toMask, photo.raster.width, photo.raster.height) : null),
+    [legacy, photo, toMask, deferred.detail],
+  );
   const renderer = useMemo(() => (!legacy && source && photo ? createCropRenderer(source.img, photo) : null), [legacy, source, photo]);
   const sampler = useMemo(
-    () => (photo ? makeSampler({ photo, settings: effective, mask: deferred.mask, toMask, photoMask, renderer }) : null),
-    [photo, effective, deferred.mask, toMask, photoMask, renderer],
+    () => (photo ? makeSampler({ photo, settings: effective, mask: deferred.mask, detail: deferred.detail, toMask, photoMask, photoDetail, renderer }) : null),
+    [photo, effective, deferred.mask, deferred.detail, toMask, photoMask, photoDetail, renderer],
   );
   const baseGrid = useMemo(() => (sampler ? pixelize(sampler, effective, deferredDef.kind(effective)) : null), [sampler, effective, deferredDef]);
   const grid = useMemo(() => (baseGrid ? applyEdits(baseGrid, deferred.edits) : null), [baseGrid, deferred.edits]);
   const puzzle = useMemo(() => (grid ? generatePuzzle(deferred.mode, grid, effective) : null), [grid, deferred.mode, effective]);
   const pixelPreview = useMemo(() => (grid ? renderThumbnail(grid, 260) : ''), [grid]);
+  const analysis = useMemo(() => (puzzle?.kind === 'nonogram' ? analyzeNonogram(puzzle, { budgetMs: 300 }) : null), [puzzle]);
   const busy = deferred !== doc;
 
   const save = useCallback(async (): Promise<string | null> => {
@@ -302,6 +322,7 @@ export function Editor({ id }: { id: string | null }) {
         puzzle: latest.puzzle,
         thumbnail: renderThumbnail(latest.grid, 320),
         mask: doc.mask ? encodeMask(doc.mask) : undefined,
+        detail: doc.detail ? encodeMask(doc.detail) : undefined,
         edits: doc.edits ?? undefined,
       };
       await putMosaic(rec);
@@ -383,6 +404,7 @@ export function Editor({ id }: { id: string | null }) {
   const zoomIn = ZOOM_STEPS.find((z) => z > zoom);
   const saveState = saving ? 'saving' : dirty ? 'dirty' : savedAt ? 'saved' : 'empty';
   const removedShare = maskCoverage(doc.mask);
+  const detailShare = maskCoverage(doc.detail);
   const touchUps = editCount(doc.edits);
   const cleanupIsDefault = (Object.keys(CLEANUP_DEFAULTS) as (keyof typeof CLEANUP_DEFAULTS)[]).every((k) => settings[k] === CLEANUP_DEFAULTS[k]);
   const openView = (v: View) => {
@@ -396,8 +418,13 @@ export function Editor({ id }: { id: string | null }) {
       localContrast: 45,
       smooth: 30,
       darkDetails: isBinary ? 40 : 25,
+      restoreContrast: 50,
       despeckle: Math.max(1, settings.despeckle),
     });
+  const openDetail = () => {
+    setPhotoTools((t) => ({ ...t, tool: 'brush', layer: 'detail', erase: true }));
+    openView('photo');
+  };
 
   // Photo and pixel views fit the picture inside the preview (by width only on phones, where the page scrolls).
   const stageAspect = view === 'pixels' && grid ? grid.width / grid.height : photo ? photo.raster.width / photo.raster.height : 1;
@@ -487,7 +514,7 @@ export function Editor({ id }: { id: string | null }) {
             }}
           >
             {source && photo && crop && toMask ? (
-              <PhotoThumb photo={photo} mask={deferred.mask} toMask={toMask} crop={crop} />
+              <PhotoThumb photo={photo} mask={deferred.mask} detail={deferred.detail} toMask={toMask} crop={crop} />
             ) : (
               <div className="dropzone-empty">
                 <span className="dropzone-icon">
@@ -720,7 +747,7 @@ export function Editor({ id }: { id: string | null }) {
             <span className="step">5</span> Photo clean-up
           </h2>
           <div className="panel-row">
-            <button className="btn small" onClick={autoFix} disabled={!source} title="Even out lighting, simplify textures and keep small dark details">
+            <button className="btn small" onClick={autoFix} disabled={!source} title="Even out lighting, simplify textures, keep small dark details and restore contrast">
               <IconSparkles size={16} /> Auto-fix photo
             </button>
             <button className="btn small ghost" onClick={() => update(CLEANUP_DEFAULTS)} disabled={cleanupIsDefault}>
@@ -734,6 +761,8 @@ export function Editor({ id }: { id: string | null }) {
           <Slider label="Even out lighting" value={settings.localContrast} min={0} max={100} onChange={slide('localContrast')} format={pct} />
           <Slider label="Simplify textures" value={settings.smooth} min={0} max={100} onChange={slide('smooth')} format={pct} />
           <Slider label="Keep dark details" value={settings.darkDetails} min={0} max={100} onChange={slide('darkDetails')} format={pct} />
+          <Slider label="Restore contrast" value={settings.restoreContrast} min={0} max={100} onChange={slide('restoreContrast')} format={pct} />
+          <p className="hint">Averaging a whole cell washes out anything thinner than a cell. This gives the cells back the contrast the photo had there, so eyes and thin lines still show.</p>
           <Slider label="Outline edges" value={settings.outlines} min={0} max={100} onChange={slide('outlines')} format={pct} />
           {(settings.despeckle > 0 || settings.converter < 2) && (
             <Slider label="Remove specks" value={settings.despeckle} min={0} max={3} onChange={slide('despeckle')} format={(v) => (v === 0 ? 'off' : `${v}`)} />
@@ -745,6 +774,14 @@ export function Editor({ id }: { id: string | null }) {
                 <span>{removedShare > 0 ? `Background: ${Math.round(removedShare * 100)}% removed` : 'Background: kept'}</span>
                 <button className="link" onClick={() => openView('photo')}>
                   {removedShare > 0 ? 'Edit' : 'Remove…'}
+                </button>
+              </div>
+              <div>
+                <span title="Areas whose contrast, colours and small features the converter protects">
+                  {detailShare > 0 ? `Detail: ${detailShare < 0.005 ? 'under 1' : Math.round(detailShare * 100)}% marked` : 'Detail: nothing marked'}
+                </span>
+                <button className="link" onClick={openDetail}>
+                  {detailShare > 0 ? 'Edit' : 'Mark…'}
                 </button>
               </div>
               <div>
@@ -791,6 +828,7 @@ export function Editor({ id }: { id: string | null }) {
               <span className="preview-meta">
                 <ModeChip mode={mode} name={def.name} />
                 <span>{puzzleSummary(puzzle)}</span>
+                {analysis && <SolvabilityChip analysis={analysis} />}
                 {busy && <span className="busy">Updating</span>}
               </span>
               <div className="zoom-stepper" role="group" aria-label="Zoom">
@@ -810,12 +848,14 @@ export function Editor({ id }: { id: string | null }) {
                 tools={photoTools}
                 onTools={(p) => setPhotoTools((t) => ({ ...t, ...p }))}
                 mask={doc.mask}
+                detail={doc.detail}
                 maskBase={source.maskBase}
                 cropRatio={settings.cropRatio}
                 ratioFree={settings.lockAspect}
                 onRatio={setCropRatio}
                 onResetCrop={resetCrop}
                 onMask={setMask}
+                onDetail={setDetail}
               />
             )}
             {view === 'pixels' && <PixelToolbar grid={grid} edits={doc.edits} tools={pixelTools} onTools={(p) => setPixelTools((t) => ({ ...t, ...p }))} onEdits={setEdits} />}
@@ -829,11 +869,19 @@ export function Editor({ id }: { id: string | null }) {
                 <p>{def.rules}</p>
               </details>
             )}
+            {(view === 'puzzle' || view === 'solution') && analysis?.status === 'ambiguous' && (
+              <div className="alert compact">
+                <span>
+                  The outlined cells can be shifted without changing a single clue, so the puzzle has more than one answer. Touch them up in Pixels, or nudge the threshold or crop.
+                </span>
+              </div>
+            )}
             <div className={`preview view-${view}`} ref={previewRef}>
               {view === 'photo' ? (
                 <PhotoStage
                   photo={photo}
                   mask={doc.mask}
+                  detail={doc.detail}
                   maskBase={source.maskBase}
                   box={box ?? { x: 0, y: 0, w: 1, h: 1 }}
                   ratio={ratio}
@@ -844,6 +892,7 @@ export function Editor({ id }: { id: string | null }) {
                   tools={photoTools}
                   onCrop={onCrop}
                   onMask={setMask}
+                  onDetail={setDetail}
                 />
               ) : view === 'pixels' ? (
                 <PixelStage
@@ -859,7 +908,7 @@ export function Editor({ id }: { id: string | null }) {
                 />
               ) : (
                 <div className="preview-inner" style={{ width: `${zoom}%` }}>
-                  <PuzzleSvg puzzle={puzzle} solution={view === 'solution'} />
+                  <PuzzleSvg puzzle={puzzle} solution={view === 'solution'} marks={analysis?.ambiguous} />
                 </div>
               )}
             </div>
@@ -883,3 +932,27 @@ export function Editor({ id }: { id: string | null }) {
 }
 
 const pct = (v: number) => (v === 0 ? 'off' : `${v}%`);
+
+const CHECK_LABEL: Record<NonogramAnalysis['status'], string> = {
+  unique: 'Solvable by logic',
+  guess: 'One answer, needs guessing',
+  ambiguous: 'More than one answer',
+  unknown: 'Check timed out',
+};
+
+const CHECK_TITLE: Record<NonogramAnalysis['status'], string> = {
+  unique: 'Row and column logic alone reaches the picture.',
+  guess: 'Only one picture fits the clues, but solving it takes trial and error.',
+  ambiguous: 'Several pictures fit these clues. The cells that differ are outlined.',
+  unknown: 'The puzzle is too big to check quickly.',
+};
+
+function SolvabilityChip({ analysis }: { analysis: NonogramAnalysis }) {
+  const n = analysis.ambiguous.length;
+  return (
+    <span className={`check check-${analysis.status}`} title={CHECK_TITLE[analysis.status]}>
+      {CHECK_LABEL[analysis.status]}
+      {analysis.status === 'ambiguous' && ` · ${n} cells`}
+    </span>
+  );
+}

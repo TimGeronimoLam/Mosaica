@@ -3,10 +3,11 @@ import { ColorByCodeSvg, FillAPixSvg, LogipixSvg, MysterySvg, NonogramSvg } from
 import { LabymageSvg } from './svg/Labymage';
 import { DotsSvg } from './svg/Dots';
 
-export function PuzzleSvg({ puzzle, solution = false }: { puzzle: Puzzle; solution?: boolean }) {
+/** `marks` outlines cells (row-major indices) the editor wants to point at, e.g. an ambiguity. */
+export function PuzzleSvg({ puzzle, solution = false, marks }: { puzzle: Puzzle; solution?: boolean; marks?: number[] }) {
   switch (puzzle.kind) {
     case 'nonogram':
-      return <NonogramSvg puzzle={puzzle} solution={solution} />;
+      return <NonogramSvg puzzle={puzzle} solution={solution} marks={marks} />;
     case 'colorByCode':
       return <ColorByCodeSvg puzzle={puzzle} solution={solution} />;
     case 'mystery':

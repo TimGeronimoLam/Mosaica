@@ -21,24 +21,28 @@ export function samplesPerCell(rectW: number, rectH: number, w: number, h: numbe
 export interface SamplerInput {
   photo: TransformedPhoto;
   settings: MosaicSettings;
-  /** Background mask in original-image coordinates, and the map from photo pixels into it. */
+  /** Background and detail masks in original-image coordinates, and the map from photo pixels into them. */
   mask: PhotoMask | null;
+  detail?: PhotoMask | null;
   toMask: Affine | null;
-  /** The mask already resampled onto `photo.raster` (converter 1 uses this). */
+  /** The masks already resampled onto `photo.raster` (converter 1 uses these). */
   photoMask: Uint8Array | null;
+  photoDetail?: Uint8Array | null;
   renderer: CropRenderer | null;
 }
 
 /** The cell sampler for the converter the mosaic uses. */
-export function makeSampler({ photo, settings: s, mask, toMask, photoMask, renderer }: SamplerInput): Sampler {
-  if ((s.converter ?? 1) < 2 || !renderer) return (w, h) => sampleGrid(photo.raster, w, h, s, photoMask);
+export function makeSampler({ photo, settings: s, mask, detail = null, toMask, photoMask, photoDetail = null, renderer }: SamplerInput): Sampler {
+  if ((s.converter ?? 1) < 2 || !renderer) return (w, h) => sampleGrid(photo.raster, w, h, s, photoMask, photoDetail);
   return (w, h) => {
     const rect = cropRect(photo.raster, w, h, s);
     const S = samplesPerCell(rect.w, rect.h, w, h, renderer.sourcePerPx);
     const W = w * S;
     const H = h * S;
     const raster = renderer.render(rect, W, H);
-    const m = mask && toMask ? transformMask(mask, multiply(toMask, [rect.w / W, 0, 0, rect.h / H, rect.x, rect.y]), W, H) : null;
-    return sampleCells(raster, w, h, S, s, m);
+    const into = toMask ? multiply(toMask, [rect.w / W, 0, 0, rect.h / H, rect.x, rect.y]) : null;
+    const m = mask && into ? transformMask(mask, into, W, H) : null;
+    const d = detail && into ? transformMask(detail, into, W, H) : null;
+    return sampleCells(raster, w, h, S, s, m, d);
   };
 }

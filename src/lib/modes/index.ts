@@ -161,6 +161,7 @@ export function defaultSettings(mode: ModeId, seed: number): MosaicSettings {
     smooth: 0,
     darkDetails: 0,
     outlines: 0,
+    restoreContrast: 0,
     threshold: 50,
     invert: false,
     dither: false,

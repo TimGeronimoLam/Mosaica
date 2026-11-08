@@ -74,6 +74,39 @@ function clearRemoved(cells: number[], removed: Uint8Array | null, blank: number
   return cells;
 }
 
+/** Cells marked as detail (at least half the cell), which clean-ups must not change. */
+function detailCells(detail: Float32Array | null): Uint8Array | null {
+  if (!detail) return null;
+  const out = new Uint8Array(detail.length);
+  let any = false;
+  for (let i = 0; i < detail.length; i++) {
+    if (detail[i] >= 0.5) {
+      out[i] = 1;
+      any = true;
+    }
+  }
+  return any ? out : null;
+}
+
+/** Cells that merging must leave alone: removed background and marked detail. */
+function lockedCells(removed: Uint8Array | null, protect: Uint8Array | null): Uint8Array | null {
+  if (!removed || !protect) return removed ?? protect;
+  const out = new Uint8Array(removed.length);
+  for (let i = 0; i < out.length; i++) out[i] = removed[i] || protect[i] ? 1 : 0;
+  return out;
+}
+
+/** Speckle removal that leaves marked detail cells as they were (an eye is one dark cell on purpose). */
+function despeckleKeeping(cells: number[], w: number, h: number, passes: number, k: number, protect: Uint8Array | null): number[] {
+  if (!passes) return cells;
+  const out = despeckle(cells, w, h, passes, k);
+  if (protect && out !== cells) for (let i = 0; i < out.length; i++) if (protect[i]) out[i] = cells[i];
+  return out;
+}
+
+/** How many times a detail cell counts when choosing the palette, so eyes and lips get colours of their own. */
+const DETAIL_WEIGHT = 3;
+
 /** How much more hue and saturation count than lightness when choosing a palette (tested on photos: 2 keeps skin, crema and fur tones apart). */
 const CHROMA_WEIGHT = 2;
 
@@ -82,9 +115,10 @@ const KMEANS_RUNS = 6;
 
 const amountOf = (s: MosaicSettings) => Math.max(0, Math.min(100, s.ditherAmount ?? 100)) / 100;
 
-function pixelizeBinary({ rgb: pts, removed }: Sampled, w: number, h: number, s: MosaicSettings): PixelGrid {
+function pixelizeBinary({ rgb: pts, removed, detail }: Sampled, w: number, h: number, s: MosaicSettings): PixelGrid {
   const n = w * h;
   const t = s.threshold / 100;
+  const protect = detailCells(detail);
   let cells: number[];
   if (s.dither && s.ditherStyle === 'pattern') {
     // Ordered dither: the threshold follows a fixed 4x4 pattern around the chosen cut.
@@ -123,16 +157,17 @@ function pixelizeBinary({ rgb: pts, removed }: Sampled, w: number, h: number, s:
   }
   if (s.invert) cells = cells.map((c) => 1 - c);
   cells = clearRemoved(cells, removed, 0);
-  cells = clearRemoved(despeckle(cells, w, h, s.despeckle, 2), removed, 0);
+  cells = clearRemoved(despeckleKeeping(cells, w, h, s.despeckle, 2, protect), removed, 0);
   // Dither dots are one-cell areas on purpose, so merging would undo the shading.
-  cells = mergeSmallRegions(cells, w, h, s.dither ? 0 : (s.minRegion ?? 0), null, removed);
+  cells = mergeSmallRegions(cells, w, h, s.dither ? 0 : (s.minRegion ?? 0), null, lockedCells(removed, protect));
   return { width: w, height: h, cells, palette: ['#ffffff', '#000000'], blank: true, kind: 'binary' };
 }
 
-function pixelizePalette({ rgb, removed }: Sampled, w: number, h: number, s: MosaicSettings): PixelGrid {
+function pixelizePalette({ rgb, removed, detail }: Sampled, w: number, h: number, s: MosaicSettings): PixelGrid {
   const n = w * h;
   const k = Math.max(2, Math.min(24, Math.round(s.colors)));
   const rng = createRng(s.seed);
+  const protect = detailCells(detail);
   // Converter 2 chooses and matches colours in OKLab, where distance follows
   // how different colours look, with hue and saturation counting double: a
   // colour-by-code palette needs distinct hues (skin vs. a grey wall, orange
@@ -143,12 +178,16 @@ function pixelizePalette({ rgb, removed }: Sampled, w: number, h: number, s: Mos
   const pts = oklab ? bufferToOklab(rgb) : rgb;
   if (oklab) for (let i = 0; i < pts.length; i += 3) (pts[i + 1] *= cw), (pts[i + 2] *= cw);
   // Only the cells that are kept take part in choosing the palette, so the
-  // background does not use up colours.
+  // background does not use up colours. Detail cells are entered several
+  // times, so their few cells still pull a palette colour towards them.
   let kept = pts;
   let keptIndex: number[] | null = null;
-  if (removed) {
+  if (removed || protect) {
     keptIndex = [];
-    for (let i = 0; i < n; i++) if (!removed[i]) keptIndex.push(i);
+    for (let i = 0; i < n; i++) {
+      if (removed?.[i]) continue;
+      for (let r = protect?.[i] ? DETAIL_WEIGHT : 1; r > 0; r--) keptIndex.push(i);
+    }
     kept = new Float32Array(keptIndex.length * 3);
     keptIndex.forEach((src, j) => kept.set(pts.subarray(src * 3, src * 3 + 3), j * 3));
   }
@@ -165,7 +204,7 @@ function pixelizePalette({ rgb, removed }: Sampled, w: number, h: number, s: Mos
     cells = new Array<number>(n).fill(0);
     keptIndex.forEach((src, j) => (cells[src] = labels[j]));
   } else cells = labels;
-  cells = despeckle(cells, w, h, s.despeckle, centers.length);
+  cells = despeckleKeeping(cells, w, h, s.despeckle, centers.length, protect);
   let palette = centers.map((c) => {
     const [r, g, b] = oklab ? oklabToSrgb(c[0], c[1] / cw, c[2] / cw) : c;
     return rgbToHex(r * 255, g * 255, b * 255);
@@ -193,7 +232,7 @@ function pixelizePalette({ rgb, removed }: Sampled, w: number, h: number, s: Mos
       const [r, g, b] = hexToRgb(hex);
       return srgbToOklab(r / 255, g / 255, b / 255);
     });
-    cells = mergeSmallRegions(cells, w, h, s.minRegion, colors, removed);
+    cells = mergeSmallRegions(cells, w, h, s.minRegion, colors, lockedCells(removed, protect));
   }
   return { width: w, height: h, cells, palette, blank, kind: 'palette' };
 }

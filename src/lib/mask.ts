@@ -285,19 +285,31 @@ export function transformMask(m: PhotoMask, toMask: Affine, outW: number, outH: 
   return out;
 }
 
+/** How a mask layer is drawn over the photo: removed background as faded paper, detail as a blue tint. */
+export type OverlayLook = 'removed' | 'detail';
+
 /**
- * Draw the removed areas as faded paper with diagonal stripes into an RGBA
- * buffer the size of the transformed picture. Only `box` is redrawn.
+ * Draw the set areas of a mask into an RGBA buffer the size of the transformed
+ * picture: removed areas as faded paper with diagonal stripes, detail areas as
+ * a translucent blue tint. Only `box` is redrawn.
  */
-export function renderMaskOverlay(rgba: Uint8ClampedArray, outW: number, m: PhotoMask | null, toMask: Affine, box: Box): void {
+export function renderMaskOverlay(rgba: Uint8ClampedArray, outW: number, m: PhotoMask | null, toMask: Affine, box: Box, look: OverlayLook = 'removed'): void {
   if (!m) {
     for (let y = box.y0; y <= box.y1; y++) rgba.fill(0, (y * outW + box.x0) * 4, (y * outW + box.x1 + 1) * 4);
     return;
   }
+  const detail = look === 'detail';
   forEachMapped(m, toMask, outW, box, (i, v) => {
     const o = i * 4;
     if (!v) {
       rgba[o + 3] = 0;
+      return;
+    }
+    if (detail) {
+      rgba[o] = 46;
+      rgba[o + 1] = 123;
+      rgba[o + 2] = 228;
+      rgba[o + 3] = 120;
       return;
     }
     const x = i % outW;
@@ -308,6 +320,90 @@ export function renderMaskOverlay(rgba: Uint8ClampedArray, outW: number, m: Phot
     rgba[o + 2] = stripe ? 46 : 255;
     rgba[o + 3] = stripe ? 200 : 190;
   });
+}
+
+/**
+ * Fill a polygon given in mask pixel coordinates into `data` (mutated) with
+ * `value`. Scanline, even-odd rule, so self-touching outlines still fill.
+ */
+export function fillPolygon(data: Uint8Array, w: number, h: number, pts: [number, number][], value: 0 | 1 = 1): void {
+  if (pts.length < 3) return;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const [, y] of pts) {
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const xs: number[] = [];
+  for (let y = Math.max(0, Math.floor(minY)); y <= Math.min(h - 1, Math.ceil(maxY)); y++) {
+    const cy = y + 0.5;
+    xs.length = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const [x0, y0] = pts[i];
+      const [x1, y1] = pts[(i + 1) % pts.length];
+      if (y0 <= cy === y1 <= cy) continue;
+      xs.push(x0 + ((cy - y0) * (x1 - x0)) / (y1 - y0));
+    }
+    xs.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const a = Math.max(0, Math.round(xs[k]));
+      const b = Math.min(w - 1, Math.round(xs[k + 1]) - 1);
+      for (let x = a; x <= b; x++) data[y * w + x] = value;
+    }
+  }
+}
+
+/** The mask with every set pixel grown by a round brush of radius r. */
+export function growMask(data: Uint8Array, w: number, h: number, r: number): Uint8Array {
+  if (r <= 0) return data.slice();
+  const R = Math.ceil(r);
+  // Each set pixel adds a run to the rows it reaches; runs are summed with a difference array per row.
+  const diff = new Int32Array(h * (w + 1));
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      if (!data[row + x]) continue;
+      for (let dy = -R; dy <= R; dy++) {
+        const ty = y + dy;
+        if (ty < 0 || ty >= h) continue;
+        const dx = Math.floor(Math.sqrt(r * r - dy * dy));
+        const base = ty * (w + 1);
+        diff[base + Math.max(0, x - dx)]++;
+        diff[base + Math.min(w, x + dx + 1)]--;
+      }
+    }
+  }
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    let acc = 0;
+    const base = y * (w + 1);
+    for (let x = 0; x < w; x++) {
+      acc += diff[base + x];
+      if (acc > 0) out[y * w + x] = 1;
+    }
+  }
+  return out;
+}
+
+/** Convex hull of the points (Andrew's monotone chain), counter-clockwise, or the points themselves when fewer than three. */
+export function convexHull(pts: [number, number][]): [number, number][] {
+  if (pts.length < 3) return pts.slice();
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o: [number, number], a: [number, number], b: [number, number]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower: [number, number][] = [];
+  for (const q of p) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
+    lower.push(q);
+  }
+  const upper: [number, number][] = [];
+  for (let i = p.length - 1; i >= 0; i--) {
+    const q = p[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
+    upper.push(q);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
 }
 
 function forEachMapped(m: PhotoMask, toMask: Affine, outW: number, box: Box, cb: (i: number, v: number) => void): void {

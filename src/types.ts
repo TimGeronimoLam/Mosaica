@@ -57,6 +57,12 @@ export interface MosaicSettings {
   darkDetails: number;
   /** 0..100: darken strong edges so outlines show. */
   outlines: number;
+  /**
+   * 0..100: perceptual downscaling. Brings back the contrast that averaging a
+   * whole cell loses, so features thinner than a cell (an eye, a whisker, a
+   * thin line) still show. Areas marked as detail always get the full effect.
+   */
+  restoreContrast: number;
   /** Binary modes: luminance cut 0..100 (cells darker than this are filled). */
   threshold: number;
   invert: boolean;
@@ -246,6 +252,8 @@ export interface MosaicRecord {
   thumbnail: string;
   /** Background removed from the photo (in original image coordinates). */
   mask?: StoredMask;
+  /** Areas of the photo marked as detail (eyes, mouth…), which the converter protects. Same coordinates as `mask`. */
+  detail?: StoredMask;
   /** Cells touched up by hand on top of the automatic pixel art. */
   edits?: CellEdits;
 }
