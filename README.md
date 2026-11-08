@@ -45,7 +45,8 @@ Photos are harder than drawings: backgrounds are busy, light falls unevenly and 
    - *Simplify textures* is an edge-preserving filter that flattens fur, skin and grass into clean areas.
    - *Keep dark details* stops eyes and thin lines from being averaged away.
    - *Restore contrast* is perceptual downscaling (see below): cells get back the contrast that averaging took away.
-   - *Outline edges* darkens strong edges, which helps nonograms and connect-the-dots.
+   - *Outline edges* darkens strong edges, which helps nonograms and connect-the-dots. After *Trace outlines* (below) it darkens the traced lines instead.
+6. **Trace the outlines** (Photo view, *Trace outlines*). One-colour puzzles (nonogram, Fill-a-Pix, Logipix, Labymage, connect the dots) show a face best as a few clean lines, not as filled blobs. This runs a line-drawing network in your browser (Informative Drawings, 17 MB, a few seconds) that draws the photo the way a person would: the jaw, the eyes, the edge of the hair, the collar. The trace is shown over the photo as ink; *Outline edges* (step 5) then darkens the cells those lines run through, in place of the brightness-edge filter, so at full strength every cell on a line fills. *Clear trace* goes back to brightness edges. The trace is kept with the mosaic in the photo's own coordinates, like the masks.
 5. **Touch up the cells** (*Pixels* view). Paint with the pencil, flood-fill an area, pick a colour from the grid, or brush cells back to the automatic result. *Photo underneath* shows where things really are. Touch-ups are stored by colour, not by palette number, so they survive changes to other settings, and they are rescaled if you change the grid size.
 
 ### How a photo becomes cells
@@ -64,11 +65,13 @@ Each step below fixes a specific weakness of the simple approach of averaging ea
 
 Mosaics saved before this converter keep the original one, so they regenerate exactly as saved. The Grid step offers to switch them over.
 
-The background and detail masks are stored in the photo's own coordinates, so they stay in place when you rotate or straighten afterwards. Both masks and the touch-ups are saved with the mosaic and included in exports.
+The background and detail masks and the traced outlines are stored in the photo's own coordinates, so they stay in place when you rotate or straighten afterwards. All three and the touch-ups are saved with the mosaic and included in exports.
+
+- **Traced outlines.** A traced line is a few pixels wide at the trace's 640 px resolution, so it covers only a sliver of a cell. The converter maps the trace into the crop so no line falls between samples, measures how much of each cell the lines cover, and counts a cell a fifth covered as fully inked; *Outline edges* sets how dark inked cells go.
 
 ### Neural networks in the browser
 
-Nothing leaves your device. *Find the subject* uses [Transformers.js](https://huggingface.co/docs/transformers.js) (ONNX Runtime's WebAssembly backend; WebGPU is avoided on purpose because ONNX Runtime 1.31 produces a garbage matte for MODNet and fails BiRefNet with a shader limit) with [Xenova/modnet](https://huggingface.co/Xenova/modnet) (Apache-2.0) or [studioludens/birefnet-lite-512](https://huggingface.co/studioludens/birefnet-lite-512) (MIT; the 1024 px export runs out of WebAssembly memory); *Find face details* uses [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker). Models and the runtime's WebAssembly are fetched from the Hugging Face hub, jsDelivr and Google's model store on first use and cached by the browser, so these two buttons need a network connection the first time; everything else works offline. The models are code-split into their own chunks and only loaded when a button is pressed.
+Nothing leaves your device. *Find the subject* uses [Transformers.js](https://huggingface.co/docs/transformers.js) (ONNX Runtime's WebAssembly backend; WebGPU is avoided on purpose because ONNX Runtime 1.31 produces a garbage matte for MODNet and fails BiRefNet with a shader limit) with [Xenova/modnet](https://huggingface.co/Xenova/modnet) (Apache-2.0) or [studioludens/birefnet-lite-512](https://huggingface.co/studioludens/birefnet-lite-512) (MIT; the 1024 px export runs out of WebAssembly memory); *Find face details* uses [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker). *Trace outlines* runs [Informative Drawings](https://github.com/carolineec/informative-drawings) (Chan, Durand & Isola, CVPR 2022; MIT), the authors' `anime_style` generator as the plain ONNX export [rocca/informative-drawings-line-art-onnx](https://huggingface.co/rocca/informative-drawings-line-art-onnx) (17 MB, fp32), also through Transformers.js on WebAssembly. The export has no `config.json`, so it is loaded with the generic model class, an inline config and the file named outright; the picture is padded to a multiple of 4 px because the generator's output grows otherwise, and pixels darker than 30% ink in the drawing make the trace. It was picked over HED and PiDiNet (research-only licence) and the *contour* style (thick, blobby lines) after comparing them on portraits. Models and the runtime's WebAssembly are fetched from the Hugging Face hub, jsDelivr and Google's model store on first use and cached by the browser, so these three buttons need a network connection the first time; everything else works offline. The models are code-split into their own chunks and only loaded when a button is pressed.
 
 ## Development
 
@@ -114,7 +117,8 @@ src/lib/transform.ts    rotate / mirror / straighten as affine maps
 src/lib/sampler.ts      picks the cell sampler for a mosaic's converter
 src/lib/preprocess.ts   crop → cell colours (average or main colour), auto levels, even lighting, simplify, outlines
 src/lib/regions.ts      merge small areas, Otsu threshold
-src/lib/mask.ts         background mask: brush, magic wand, auto background, storage
+src/lib/mask.ts         photo masks (background, detail, traced outlines): brush, magic wand, auto background, storage
+src/lib/ai/             neural networks in the browser: subject segmentation, face features, line art
 src/lib/edits.ts        cell touch-ups on top of the automatic pixel art
 src/lib/history.ts      undo / redo stack
 src/lib/quantize.ts     k-means palette, Floyd–Steinberg and ordered dithering

@@ -4,6 +4,7 @@ import type { CropRect, SourceRaster, TransformedPhoto } from '../lib/image';
 import { combineMask, emptyMask, invertMask, maskCoverage, normalizeMask, paintSegment, renderMaskOverlay, selectBackground, selectSimilar, type Box, type OverlayLook, type PhotoMask } from '../lib/mask';
 import { findFaceDetails } from '../lib/ai/face';
 import { findSubject, SUBJECT_MODELS, type SubjectModel } from '../lib/ai/segment';
+import { LINEART_MODEL, traceOutlines } from '../lib/ai/lineart';
 import { apply, invert, multiply, scaleOf, scaling, type Affine } from '../lib/transform';
 import { IconBrush, IconCrop, IconInvert, IconSparkles, IconTrash, IconWand } from './Icons';
 import { capture, Segmented, Slider } from './ui';
@@ -49,11 +50,26 @@ function paintOverlay(canvas: HTMLCanvasElement, mask: PhotoMask | null, toMask:
   ctx.putImageData(img, b.x0, b.y0);
 }
 
-/** The photo with its removed background and detail areas, as a small picture (sidebar). */
-export function PhotoThumb({ photo, mask, detail, toMask, crop }: { photo: TransformedPhoto; mask: PhotoMask | null; detail?: PhotoMask | null; toMask: Affine; crop: CropRect }) {
+/** The photo with its removed background, detail areas and traced outlines, as a small picture (sidebar). */
+export function PhotoThumb({
+  photo,
+  mask,
+  detail,
+  lineart,
+  toMask,
+  crop,
+}: {
+  photo: TransformedPhoto;
+  mask: PhotoMask | null;
+  detail?: PhotoMask | null;
+  lineart?: PhotoMask | null;
+  toMask: Affine;
+  crop: CropRect;
+}) {
   const img = useRef<HTMLCanvasElement>(null);
   const ov = useRef<HTMLCanvasElement>(null);
   const dt = useRef<HTMLCanvasElement>(null);
+  const ln = useRef<HTMLCanvasElement>(null);
   const { width: W, height: H } = photo.raster;
   useLayoutEffect(() => {
     img.current?.getContext('2d')?.drawImage(photo.canvas, 0, 0);
@@ -64,11 +80,15 @@ export function PhotoThumb({ photo, mask, detail, toMask, crop }: { photo: Trans
   useLayoutEffect(() => {
     if (dt.current) paintOverlay(dt.current, detail ?? null, toMask, 'detail');
   }, [photo, detail, toMask]);
+  useLayoutEffect(() => {
+    if (ln.current) paintOverlay(ln.current, lineart ?? null, toMask, 'ink');
+  }, [photo, lineart, toMask]);
   return (
     <div className="crop-preview" style={{ aspectRatio: `${W} / ${H}`, width: `min(100%, ${Math.round((320 * W) / H)}px)` }}>
       <canvas ref={img} width={W} height={H} />
       <canvas ref={ov} width={W} height={H} className="mask-layer" />
       <canvas ref={dt} width={W} height={H} className="mask-layer" />
+      <canvas ref={ln} width={W} height={H} className="mask-layer" />
       <div className="crop-box" style={cropStyle(crop, W, H)} />
     </div>
   );
@@ -83,6 +103,8 @@ interface StageProps {
   mask: PhotoMask | null;
   /** Areas to protect as detail, in the same coordinates as `mask`. */
   detail: PhotoMask | null;
+  /** Outlines traced by the line-art network, in the same coordinates as `mask`. */
+  lineart: PhotoMask | null;
   /** The untransformed photo at mask resolution, for the wand. */
   maskBase: SourceRaster;
   /** The crop, as fractions of the photo. */
@@ -129,11 +151,12 @@ function handleAt(h: Handle): [number, number] {
   return [h.includes('w') ? 0 : h.includes('e') ? 1 : 0.5, h.includes('n') ? 0 : h.includes('s') ? 1 : 0.5];
 }
 
-export function PhotoStage({ photo, mask, detail, maskBase, box, ratio, gridWidth, gridHeight, cellSize, displayWidth, tools, onCrop, onMask, onDetail }: StageProps) {
+export function PhotoStage({ photo, mask, detail, lineart, maskBase, box, ratio, gridWidth, gridHeight, cellSize, displayWidth, tools, onCrop, onMask, onDetail }: StageProps) {
   const stage = useRef<HTMLDivElement>(null);
   const imgCanvas = useRef<HTMLCanvasElement>(null);
   const ovCanvas = useRef<HTMLCanvasElement>(null);
   const dtCanvas = useRef<HTMLCanvasElement>(null);
+  const lnCanvas = useRef<HTMLCanvasElement>(null);
   const layerCanvas = { background: ovCanvas, detail: dtCanvas };
   const layerMask = { background: mask, detail };
   const setLayer = { background: onMask, detail: onDetail };
@@ -163,6 +186,10 @@ export function PhotoStage({ photo, mask, detail, maskBase, box, ratio, gridWidt
   useLayoutEffect(() => {
     if (dtCanvas.current) paintOverlay(dtCanvas.current, detail, photoToMask(photo, mw, mh), 'detail');
   }, [photo, detail, mw, mh]);
+
+  useLayoutEffect(() => {
+    if (lnCanvas.current) paintOverlay(lnCanvas.current, lineart, photoToMask(photo, mw, mh), 'ink');
+  }, [photo, lineart, mw, mh]);
 
   // Ctrl/⌘ + wheel (and trackpad pinch, which arrives as ctrl+wheel) resizes the crop around its centre.
   const boxRef = useRef(box);
@@ -324,6 +351,7 @@ export function PhotoStage({ photo, mask, detail, maskBase, box, ratio, gridWidt
       <canvas ref={imgCanvas} width={W} height={H} />
       <canvas ref={ovCanvas} width={W} height={H} className="mask-layer" />
       <canvas ref={dtCanvas} width={W} height={H} className="mask-layer" />
+      <canvas ref={lnCanvas} width={W} height={H} className="mask-layer" />
       <div
         className={`crop-frame ${tools.tool === 'crop' ? 'active' : 'faint'}`}
         style={{ left: box.x * displayWidth, top: box.y * displayHeight, width: box.w * displayWidth, height: box.h * displayHeight }}
@@ -359,6 +387,7 @@ interface ToolbarProps {
   onTools: (patch: Partial<PhotoTools>) => void;
   mask: PhotoMask | null;
   detail: PhotoMask | null;
+  lineart: PhotoMask | null;
   maskBase: SourceRaster;
   cropRatio: CropRatio;
   /** False when the grid size is fixed by hand, so the crop has to keep the grid's shape. */
@@ -367,16 +396,18 @@ interface ToolbarProps {
   onResetCrop: () => void;
   onMask: (m: PhotoMask | null) => void;
   onDetail: (m: PhotoMask | null) => void;
+  onLineart: (m: PhotoMask | null) => void;
 }
 
 /** A neural network running on the photo: what it is doing, or what went wrong. */
 type AiState = { status: 'idle' } | { status: 'busy'; message: string } | { status: 'error'; message: string };
 
-export function PhotoToolbar({ tools, onTools, mask, detail, maskBase, cropRatio, ratioFree, onRatio, onResetCrop, onMask, onDetail }: ToolbarProps) {
+export function PhotoToolbar({ tools, onTools, mask, detail, lineart, maskBase, cropRatio, ratioFree, onRatio, onResetCrop, onMask, onDetail, onLineart }: ToolbarProps) {
   const mw = maskBase.width;
   const mh = maskBase.height;
   const removed = maskCoverage(mask);
   const marked = maskCoverage(detail);
+  const inked = maskCoverage(lineart);
   const [notice, setNotice] = useState<string | null>(null);
   const [ai, setAi] = useState<AiState>({ status: 'idle' });
   useEffect(() => setNotice(null), [tools.tool, tools.erase, tools.layer]);
@@ -418,6 +449,14 @@ export function PhotoToolbar({ tools, onTools, mask, detail, maskBase, cropRatio
       if (!found.faces) return 'No face found. Mark the important parts with the brush instead.';
       onDetail(normalizeMask(combineMask(detail, found.mask, 1, mw, mh)));
       return `Marked the eyes, brows, nose and mouth of ${found.faces === 1 ? 'one face' : `${found.faces} faces`}.`;
+    });
+  const aiTrace = () =>
+    runAi(async (progress) => {
+      const ink = await traceOutlines(maskBase, progress);
+      const traced = normalizeMask({ width: mw, height: mh, data: ink });
+      onLineart(traced);
+      if (!traced) return 'The model drew nothing for this photo.';
+      return 'Traced. The “Outline edges” slider (step 5) now darkens these lines instead of brightness edges.';
     });
   const busy = ai.status === 'busy';
   const autoBackground = () => {
@@ -563,6 +602,20 @@ export function PhotoToolbar({ tools, onTools, mask, detail, maskBase, cropRatio
           </div>
         </>
       )}
+      <div className="tool-row">
+        <button
+          className="btn small"
+          onClick={aiTrace}
+          disabled={busy}
+          title={`Draw the photo's outlines with a line-art network (${LINEART_MODEL.label}, runs in your browser; the model is downloaded once). “Outline edges” then darkens the traced lines.`}
+        >
+          <IconSparkles size={16} /> Trace outlines
+        </button>
+        <button className="btn small ghost" onClick={() => onLineart(null)} disabled={!lineart}>
+          <IconTrash size={16} /> Clear trace
+        </button>
+        {inked > 0 && <span className="tool-note">{inked < 0.005 ? 'under 1' : Math.round(inked * 100)}% inked</span>}
+      </div>
       {ai.status !== 'idle' ? (
         <p className={`hint ${ai.status === 'error' ? 'warn' : 'ai-busy'}`} role="status" aria-live="polite">
           {ai.message}

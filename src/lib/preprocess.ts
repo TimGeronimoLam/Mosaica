@@ -31,23 +31,44 @@ const lum = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.072
  *
  * `mask` (same size as the photo, 1 = background) marks cells to leave blank;
  * `detailMask` (same size, 1 = detail) marks areas whose contrast and small
- * features the converter protects.
+ * features the converter protects; `inkMask` (same size, 1 = ink) is the
+ * traced outline the outlines setting darkens instead of brightness edges.
  */
-export function sampleGrid(src: SourceRaster, w: number, h: number, s: CleanupSettings, mask?: Uint8Array | null, detailMask?: Uint8Array | null): Sampled {
+export function sampleGrid(
+  src: SourceRaster,
+  w: number,
+  h: number,
+  s: CleanupSettings,
+  mask?: Uint8Array | null,
+  detailMask?: Uint8Array | null,
+  inkMask?: Uint8Array | null,
+): Sampled {
   const rect = cropRect(src, w, h, s);
-  const detail = s.localContrast > 0 || s.smooth > 0 || s.darkDetails > 0 || s.outlines > 0 || s.cellColor === 'main' || (s.restoreContrast ?? 0) > 0 || !!detailMask;
+  const detail =
+    s.localContrast > 0 || s.smooth > 0 || s.darkDetails > 0 || s.outlines > 0 || s.cellColor === 'main' || (s.restoreContrast ?? 0) > 0 || !!detailMask || !!inkMask;
   const S = detail ? Math.max(1, Math.min(4, Math.floor(Math.min(rect.w / w, rect.h / h)))) : 1;
   const { rgb, cover } = resampleArea(src, rect, w * S, h * S, mask ?? null);
   const want = detailMask ? resampleCoverage(detailMask, src.width, src.height, rect, w * S, h * S) : null;
-  return finish(rgb, cover, want, w, h, S, s);
+  const ink = inkMask ? resampleCoverage(inkMask, src.width, src.height, rect, w * S, h * S) : null;
+  return finish(rgb, cover, want, ink, w, h, S, s);
 }
 
 /**
  * Like sampleGrid, for a crop that has already been rendered at S x S pixels
- * per cell (w*S x h*S) straight from the full-resolution photo. `mask` and
- * `detailMask` are the background and detail masks at that same size.
+ * per cell (w*S x h*S) straight from the full-resolution photo. `mask`,
+ * `detailMask` and `inkMask` are the background, detail and outline masks at
+ * that same size.
  */
-export function sampleCells(src: SourceRaster, w: number, h: number, S: number, s: CleanupSettings, mask?: Uint8Array | null, detailMask?: Uint8Array | null): Sampled {
+export function sampleCells(
+  src: SourceRaster,
+  w: number,
+  h: number,
+  S: number,
+  s: CleanupSettings,
+  mask?: Uint8Array | null,
+  detailMask?: Uint8Array | null,
+  inkMask?: Uint8Array | null,
+): Sampled {
   const n = w * S * h * S;
   const rgb = new Float32Array(n * 3);
   const { data } = src;
@@ -57,23 +78,34 @@ export function sampleCells(src: SourceRaster, w: number, h: number, S: number, 
     rgb[i * 3 + 1] = (data[i * 4 + 1] * a + 255 * (1 - a)) / 255;
     rgb[i * 3 + 2] = (data[i * 4 + 2] * a + 255 * (1 - a)) / 255;
   }
-  return finish(rgb, mask ? Float32Array.from(mask) : null, detailMask ? Float32Array.from(detailMask) : null, w, h, S, s);
+  return finish(
+    rgb,
+    mask ? Float32Array.from(mask) : null,
+    detailMask ? Float32Array.from(detailMask) : null,
+    inkMask ? Float32Array.from(inkMask) : null,
+    w,
+    h,
+    S,
+    s,
+  );
 }
 
 /** Tone, filters, then reduce S x S blocks to cells. */
-function finish(rgb: Float32Array, cover: Float32Array | null, want: Float32Array | null, w: number, h: number, S: number, s: CleanupSettings): Sampled {
+function finish(rgb: Float32Array, cover: Float32Array | null, want: Float32Array | null, ink: Float32Array | null, w: number, h: number, S: number, s: CleanupSettings): Sampled {
   const W = w * S;
   const H = h * S;
   tone(rgb, cover, s);
   if (s.localContrast > 0) evenLighting(rgb, W, H, s.localContrast / 100, cover);
   if (s.smooth > 0) kuwahara(rgb, W, H, Math.max(1, Math.round((s.smooth / 100) * 1.5 * S)));
-  if (s.outlines > 0) drawOutlines(rgb, W, H, s.outlines / 100, Math.max(1, Math.round(S / 2)));
+  // A traced outline replaces the brightness-edge filter.
+  if (s.outlines > 0 && !ink) drawOutlines(rgb, W, H, s.outlines / 100, Math.max(1, Math.round(S / 2)));
   for (let i = 0; i < rgb.length; i++) rgb[i] = clamp01(rgb[i]);
   let detail = want ? cellShare(want, w, h, S) : null;
   if (detail && !detail.some((v) => v > 0)) detail = null;
   const out = S === 1 ? rgb : downsample(rgb, W, H, S, s.darkDetails / 100, s.cellColor === 'main', cover, detail);
   const amount = Math.max(0, Math.min(100, s.restoreContrast ?? 0)) / 100;
   if (S > 1 && (amount > 0 || detail)) restoreContrast(out, rgb, W, H, S, amount, cover, detail);
+  if (ink && s.outlines > 0) inkOutlines(out, cellShare(ink, w, h, S), s.outlines / 100);
   let removed: Uint8Array | null = null;
   if (cover) {
     const share = cellShare(cover, w, h, S);
@@ -522,6 +554,26 @@ export function kuwahara(rgb: Float32Array, W: number, H: number, r: number): vo
     }
   }
   rgb.set(out);
+}
+
+/** Share of a cell a traced line has to cover before the cell counts as fully inked. */
+export const INK_FULL = 0.2;
+
+/**
+ * Darken cells a traced outline runs through, by strength k (0..1). A line a
+ * few pixels wide covers only a sliver of a cell, so coverage is scaled up:
+ * a cell a fifth covered is already fully inked, and at full strength it goes
+ * black. Cells the line misses are untouched.
+ */
+export function inkOutlines(cells: Float32Array, share: Float32Array, k: number): void {
+  for (let i = 0; i < share.length; i++) {
+    const d = k * Math.min(1, share[i] / INK_FULL);
+    if (d <= 0) continue;
+    const f = 1 - d;
+    cells[i * 3] *= f;
+    cells[i * 3 + 1] *= f;
+    cells[i * 3 + 2] *= f;
+  }
 }
 
 /** Darken pixels on strong brightness edges so outlines survive as lines of cells. */

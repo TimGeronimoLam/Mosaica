@@ -6,7 +6,7 @@ import { getMosaic, newId, putMosaic } from '../lib/db';
 import { applyEdits, editCount, type CellEdits } from '../lib/edits';
 import { CROP_RATIOS, currentBox, dragRatio, largestBox, ratioValue, reconcile, withRatio, type CropRatio } from '../lib/crop';
 import { createCropRenderer, cropRect, loadImageElement, prepareSourceBlob, rasterize, renderTransformed, type SourceRaster } from '../lib/image';
-import { MASK_MAX, decodeMask, encodeMask, maskCoverage, resizeMask, transformMask, type PhotoMask } from '../lib/mask';
+import { MASK_MAX, decodeMask, encodeMask, maskCoverage, resizeMask, transformMask, transformMaskMax, type PhotoMask } from '../lib/mask';
 import { MODES, MODE_BY_ID, defaultSettings, generatePuzzle, loadSettings, normalizeSettings } from '../lib/modes';
 import { pixelize, suggestThreshold } from '../lib/pixelize';
 import { makeSampler } from '../lib/sampler';
@@ -58,6 +58,8 @@ interface Doc {
   mask: PhotoMask | null;
   /** Areas marked as detail (eyes, mouth…) that the converter protects. */
   detail: PhotoMask | null;
+  /** Outlines traced by the line-art network, which "Outline edges" darkens. */
+  lineart: PhotoMask | null;
   edits: CellEdits | null;
 }
 
@@ -90,14 +92,17 @@ function build(source: Source, d: Doc) {
   const legacy = effective.converter < 2;
   const photoMask = d.mask && legacy ? transformMask(d.mask, toMask, photo.raster.width, photo.raster.height) : null;
   const photoDetail = d.detail && legacy ? transformMask(d.detail, toMask, photo.raster.width, photo.raster.height) : null;
+  const photoLineart = d.lineart && legacy ? transformMaskMax(d.lineart, toMask, photo.raster.width, photo.raster.height) : null;
   const sampler = makeSampler({
     photo,
     settings: effective,
     mask: d.mask,
     detail: d.detail,
+    lineart: d.lineart,
     toMask,
     photoMask,
     photoDetail,
+    photoLineart,
     renderer: legacy ? null : createCropRenderer(source.img, photo),
   });
   const grid = applyEdits(pixelize(sampler, effective, MODE_BY_ID[d.mode].kind(effective)), d.edits);
@@ -137,7 +142,7 @@ export function Editor({ id }: { id: string | null }) {
   const [loading, setLoading] = useState(!!id);
   const [error, setError] = useState<string | null>(null);
   const [title, setTitle] = useState('');
-  const history = useHistory<Doc>(() => ({ mode: 'colorByCode', settings: defaultSettings('colorByCode', randomSeed()), mask: null, detail: null, edits: null }));
+  const history = useHistory<Doc>(() => ({ mode: 'colorByCode', settings: defaultSettings('colorByCode', randomSeed()), mask: null, detail: null, lineart: null, edits: null }));
   const doc = history.present;
   const { mode, settings } = doc;
   const setDoc = history.set;
@@ -190,6 +195,7 @@ export function Editor({ id }: { id: string | null }) {
             settings: loadSettings(rec.mode, rec.settings),
             mask: rec.mask ? resizeMask(decodeMask(rec.mask), src.maskBase.width, src.maskBase.height) : null,
             detail: rec.detail ? resizeMask(decodeMask(rec.detail), src.maskBase.width, src.maskBase.height) : null,
+            lineart: rec.lineart ? resizeMask(decodeMask(rec.lineart), src.maskBase.width, src.maskBase.height) : null,
             edits: rec.edits ?? null,
           };
           history.reset(loaded);
@@ -224,6 +230,7 @@ export function Editor({ id }: { id: string | null }) {
   const slide = (key: keyof MosaicSettings) => (v: number) => update({ [key]: v }, key);
   const setMask = useCallback((mask: PhotoMask | null) => setDoc((prev) => ({ ...prev, mask })), [setDoc]);
   const setDetail = useCallback((detail: PhotoMask | null) => setDoc((prev) => ({ ...prev, detail })), [setDoc]);
+  const setLineart = useCallback((lineart: PhotoMask | null) => setDoc((prev) => ({ ...prev, lineart })), [setDoc]);
   const setEdits = useCallback((edits: CellEdits | null) => setDoc((prev) => ({ ...prev, edits })), [setDoc]);
   const onCrop = useCallback((crop: MosaicSettings['crop']) => update({ crop }, 'crop'), [update]);
 
@@ -264,7 +271,7 @@ export function Editor({ id }: { id: string | null }) {
       const base: MosaicSettings = { ...settings, rotate: 0, flipH: false, flipV: false, straighten: 0, zoom: 1, cx: 0.5, cy: 0.5 };
       const A = photoAspect(img, base);
       const s = reconcile({ ...base, crop: largestBox(base.lockAspect ? ratioValue(base.cropRatio, A) : base.gridWidth / base.gridHeight, A) }, A);
-      history.reset({ mode, settings: normalizeSettings(mode, s), mask: null, detail: null, edits: null });
+      history.reset({ mode, settings: normalizeSettings(mode, s), mask: null, detail: null, lineart: null, edits: null });
       if (!title) setTitle(file.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' '));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -288,10 +295,28 @@ export function Editor({ id }: { id: string | null }) {
     () => (legacy && photo && toMask && deferred.detail ? transformMask(deferred.detail, toMask, photo.raster.width, photo.raster.height) : null),
     [legacy, photo, toMask, deferred.detail],
   );
+  const photoLineart = useMemo(
+    () => (legacy && photo && toMask && deferred.lineart ? transformMaskMax(deferred.lineart, toMask, photo.raster.width, photo.raster.height) : null),
+    [legacy, photo, toMask, deferred.lineart],
+  );
   const renderer = useMemo(() => (!legacy && source && photo ? createCropRenderer(source.img, photo) : null), [legacy, source, photo]);
   const sampler = useMemo(
-    () => (photo ? makeSampler({ photo, settings: effective, mask: deferred.mask, detail: deferred.detail, toMask, photoMask, photoDetail, renderer }) : null),
-    [photo, effective, deferred.mask, deferred.detail, toMask, photoMask, photoDetail, renderer],
+    () =>
+      photo
+        ? makeSampler({
+            photo,
+            settings: effective,
+            mask: deferred.mask,
+            detail: deferred.detail,
+            lineart: deferred.lineart,
+            toMask,
+            photoMask,
+            photoDetail,
+            photoLineart,
+            renderer,
+          })
+        : null,
+    [photo, effective, deferred.mask, deferred.detail, deferred.lineart, toMask, photoMask, photoDetail, photoLineart, renderer],
   );
   const baseGrid = useMemo(() => (sampler ? pixelize(sampler, effective, deferredDef.kind(effective)) : null), [sampler, effective, deferredDef]);
   const grid = useMemo(() => (baseGrid ? applyEdits(baseGrid, deferred.edits) : null), [baseGrid, deferred.edits]);
@@ -323,6 +348,7 @@ export function Editor({ id }: { id: string | null }) {
         thumbnail: renderThumbnail(latest.grid, 320),
         mask: doc.mask ? encodeMask(doc.mask) : undefined,
         detail: doc.detail ? encodeMask(doc.detail) : undefined,
+        lineart: doc.lineart ? encodeMask(doc.lineart) : undefined,
         edits: doc.edits ?? undefined,
       };
       await putMosaic(rec);
@@ -514,7 +540,7 @@ export function Editor({ id }: { id: string | null }) {
             }}
           >
             {source && photo && crop && toMask ? (
-              <PhotoThumb photo={photo} mask={deferred.mask} detail={deferred.detail} toMask={toMask} crop={crop} />
+              <PhotoThumb photo={photo} mask={deferred.mask} detail={deferred.detail} lineart={deferred.lineart} toMask={toMask} crop={crop} />
             ) : (
               <div className="dropzone-empty">
                 <span className="dropzone-icon">
@@ -763,7 +789,8 @@ export function Editor({ id }: { id: string | null }) {
           <Slider label="Keep dark details" value={settings.darkDetails} min={0} max={100} onChange={slide('darkDetails')} format={pct} />
           <Slider label="Restore contrast" value={settings.restoreContrast} min={0} max={100} onChange={slide('restoreContrast')} format={pct} />
           <p className="hint">Averaging a whole cell washes out anything thinner than a cell. This gives the cells back the contrast the photo had there, so eyes and thin lines still show.</p>
-          <Slider label="Outline edges" value={settings.outlines} min={0} max={100} onChange={slide('outlines')} format={pct} />
+          <Slider label={doc.lineart ? 'Outline edges (traced)' : 'Outline edges'} value={settings.outlines} min={0} max={100} onChange={slide('outlines')} format={pct} />
+          {doc.lineart && <p className="hint">Darkens the cells the traced outlines run through. Clear the trace in the Photo view to go back to brightness edges.</p>}
           {(settings.despeckle > 0 || settings.converter < 2) && (
             <Slider label="Remove specks" value={settings.despeckle} min={0} max={3} onChange={slide('despeckle')} format={(v) => (v === 0 ? 'off' : `${v}`)} />
           )}
@@ -782,6 +809,12 @@ export function Editor({ id }: { id: string | null }) {
                 </span>
                 <button className="link" onClick={openDetail}>
                   {detailShare > 0 ? 'Edit' : 'Mark…'}
+                </button>
+              </div>
+              <div>
+                <span title="Outlines drawn by the line-art network, which Outline edges darkens">{doc.lineart ? 'Outlines: traced' : 'Outlines: not traced'}</span>
+                <button className="link" onClick={() => openView('photo')}>
+                  {doc.lineart ? 'Edit' : 'Trace…'}
                 </button>
               </div>
               <div>
@@ -849,6 +882,7 @@ export function Editor({ id }: { id: string | null }) {
                 onTools={(p) => setPhotoTools((t) => ({ ...t, ...p }))}
                 mask={doc.mask}
                 detail={doc.detail}
+                lineart={doc.lineart}
                 maskBase={source.maskBase}
                 cropRatio={settings.cropRatio}
                 ratioFree={settings.lockAspect}
@@ -856,6 +890,7 @@ export function Editor({ id }: { id: string | null }) {
                 onResetCrop={resetCrop}
                 onMask={setMask}
                 onDetail={setDetail}
+                onLineart={setLineart}
               />
             )}
             {view === 'pixels' && <PixelToolbar grid={grid} edits={doc.edits} tools={pixelTools} onTools={(p) => setPixelTools((t) => ({ ...t, ...p }))} onEdits={setEdits} />}
@@ -882,6 +917,7 @@ export function Editor({ id }: { id: string | null }) {
                   photo={photo}
                   mask={doc.mask}
                   detail={doc.detail}
+                  lineart={doc.lineart}
                   maskBase={source.maskBase}
                   box={box ?? { x: 0, y: 0, w: 1, h: 1 }}
                   ratio={ratio}

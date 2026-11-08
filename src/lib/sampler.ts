@@ -1,6 +1,6 @@
 import type { MosaicSettings } from '../types';
 import { cropRect, type CropRenderer, type TransformedPhoto } from './image';
-import { transformMask, type PhotoMask } from './mask';
+import { transformMask, transformMaskMax, type PhotoMask } from './mask';
 import type { Sampler } from './pixelize';
 import { sampleCells, sampleGrid } from './preprocess';
 import { multiply, type Affine } from './transform';
@@ -21,19 +21,21 @@ export function samplesPerCell(rectW: number, rectH: number, w: number, h: numbe
 export interface SamplerInput {
   photo: TransformedPhoto;
   settings: MosaicSettings;
-  /** Background and detail masks in original-image coordinates, and the map from photo pixels into them. */
+  /** Background, detail and traced-outline masks in original-image coordinates, and the map from photo pixels into them. */
   mask: PhotoMask | null;
   detail?: PhotoMask | null;
+  lineart?: PhotoMask | null;
   toMask: Affine | null;
   /** The masks already resampled onto `photo.raster` (converter 1 uses these). */
   photoMask: Uint8Array | null;
   photoDetail?: Uint8Array | null;
+  photoLineart?: Uint8Array | null;
   renderer: CropRenderer | null;
 }
 
 /** The cell sampler for the converter the mosaic uses. */
-export function makeSampler({ photo, settings: s, mask, detail = null, toMask, photoMask, photoDetail = null, renderer }: SamplerInput): Sampler {
-  if ((s.converter ?? 1) < 2 || !renderer) return (w, h) => sampleGrid(photo.raster, w, h, s, photoMask, photoDetail);
+export function makeSampler({ photo, settings: s, mask, detail = null, lineart = null, toMask, photoMask, photoDetail = null, photoLineart = null, renderer }: SamplerInput): Sampler {
+  if ((s.converter ?? 1) < 2 || !renderer) return (w, h) => sampleGrid(photo.raster, w, h, s, photoMask, photoDetail, photoLineart);
   return (w, h) => {
     const rect = cropRect(photo.raster, w, h, s);
     const S = samplesPerCell(rect.w, rect.h, w, h, renderer.sourcePerPx);
@@ -43,6 +45,8 @@ export function makeSampler({ photo, settings: s, mask, detail = null, toMask, p
     const into = toMask ? multiply(toMask, [rect.w / W, 0, 0, rect.h / H, rect.x, rect.y]) : null;
     const m = mask && into ? transformMask(mask, into, W, H) : null;
     const d = detail && into ? transformMask(detail, into, W, H) : null;
-    return sampleCells(raster, w, h, S, s, m, d);
+    // Samples can be coarser than the traced lines, so these are mapped so no line is skipped.
+    const ink = lineart && into ? transformMaskMax(lineart, into, W, H) : null;
+    return sampleCells(raster, w, h, S, s, m, d, ink);
   };
 }

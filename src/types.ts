@@ -55,7 +55,7 @@ export interface MosaicSettings {
   smooth: number;
   /** 0..100: keep thin dark features (eyes, lines) that averaging would lose. */
   darkDetails: number;
-  /** 0..100: darken strong edges so outlines show. */
+  /** 0..100: darken strong edges (or the traced outlines, when the photo has been traced) so outlines show. */
   outlines: number;
   /**
    * 0..100: perceptual downscaling. Brings back the contrast that averaging a
@@ -254,6 +254,8 @@ export interface MosaicRecord {
   mask?: StoredMask;
   /** Areas of the photo marked as detail (eyes, mouth…), which the converter protects. Same coordinates as `mask`. */
   detail?: StoredMask;
+  /** Outlines traced by the line-art network (1 = ink), which "Outline edges" darkens. Same coordinates as `mask`. */
+  lineart?: StoredMask;
   /** Cells touched up by hand on top of the automatic pixel art. */
   edits?: CellEdits;
 }

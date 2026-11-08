@@ -1,5 +1,5 @@
 import { boxBlur } from './preprocess';
-import { apply, type Affine } from './transform';
+import { apply, scaleOf, type Affine } from './transform';
 
 /**
  * Parts of the photo marked as background. Stored in the coordinates of the
@@ -285,13 +285,41 @@ export function transformMask(m: PhotoMask, toMask: Affine, outW: number, outH: 
   return out;
 }
 
-/** How a mask layer is drawn over the photo: removed background as faded paper, detail as a blue tint. */
-export type OverlayLook = 'removed' | 'detail';
+/**
+ * Like transformMask, but an output pixel is set when any of the mask pixels
+ * under it is set. Nearest sampling skips a line thinner than an output pixel
+ * (a traced outline sampled a few mask pixels apart); this keeps it.
+ */
+export function transformMaskMax(m: PhotoMask, toMask: Affine, outW: number, outH: number): Uint8Array {
+  // Mask pixels per output pixel decides how many points to test inside each output pixel.
+  const sub = Math.max(1, Math.min(4, Math.ceil(scaleOf(toMask))));
+  if (sub === 1) return transformMask(m, toMask, outW, outH);
+  const out = new Uint8Array(outW * outH);
+  const { width: mw, height: mh, data } = m;
+  for (let y = 0; y < outH; y++) {
+    for (let x = 0; x < outW; x++) {
+      let hit = 0;
+      for (let j = 0; j < sub && !hit; j++) {
+        for (let i = 0; i < sub && !hit; i++) {
+          const [mx, my] = apply(toMask, x + (i + 0.5) / sub, y + (j + 0.5) / sub);
+          const ix = Math.floor(mx);
+          const iy = Math.floor(my);
+          if (ix >= 0 && iy >= 0 && ix < mw && iy < mh && data[iy * mw + ix]) hit = 1;
+        }
+      }
+      out[y * outW + x] = hit;
+    }
+  }
+  return out;
+}
+
+/** How a mask layer is drawn over the photo: removed background as faded paper, detail as a blue tint, traced outlines as ink. */
+export type OverlayLook = 'removed' | 'detail' | 'ink';
 
 /**
  * Draw the set areas of a mask into an RGBA buffer the size of the transformed
  * picture: removed areas as faded paper with diagonal stripes, detail areas as
- * a translucent blue tint. Only `box` is redrawn.
+ * a translucent blue tint, traced outlines as ink. Only `box` is redrawn.
  */
 export function renderMaskOverlay(rgba: Uint8ClampedArray, outW: number, m: PhotoMask | null, toMask: Affine, box: Box, look: OverlayLook = 'removed'): void {
   if (!m) {
@@ -299,10 +327,18 @@ export function renderMaskOverlay(rgba: Uint8ClampedArray, outW: number, m: Phot
     return;
   }
   const detail = look === 'detail';
+  const ink = look === 'ink';
   forEachMapped(m, toMask, outW, box, (i, v) => {
     const o = i * 4;
     if (!v) {
       rgba[o + 3] = 0;
+      return;
+    }
+    if (ink) {
+      rgba[o] = 24;
+      rgba[o + 1] = 20;
+      rgba[o + 2] = 48;
+      rgba[o + 3] = 225;
       return;
     }
     if (detail) {
