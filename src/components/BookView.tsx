@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { MosaicRecord, PaperSize } from '../types';
 import { useMosaics } from '../hooks';
-import { MODE_BY_ID, MODES } from '../lib/modes';
+import { MODES } from '../lib/modes';
 import { href } from '../router';
 import { Logo } from './Header';
 import { IconArrowDown, IconArrowLeft, IconArrowUp, IconBook, IconInfo, IconPlus, IconPrinter } from './Icons';
 import { PrintRoot, PuzzleSheet, Sheet, SheetFooter } from './Sheet';
 import { PuzzleSvg, puzzleSummary } from './PuzzleSvg';
 import { Segmented, Toggle } from './ui';
+import { useT } from '../i18n';
 
 interface BookOptions {
   title: string;
@@ -20,7 +21,7 @@ interface BookOptions {
 }
 
 const DEFAULTS: BookOptions = {
-  title: 'My Mosaic Book',
+  title: '',
   subtitle: '',
   paper: 'A4',
   includeSolutions: true,
@@ -32,13 +33,17 @@ const DEFAULTS: BookOptions = {
 function loadOptions(): BookOptions {
   try {
     const raw = localStorage.getItem('mosaica.book');
-    return raw ? { ...DEFAULTS, ...(JSON.parse(raw) as Partial<BookOptions>) } : DEFAULTS;
+    const saved = raw ? { ...DEFAULTS, ...(JSON.parse(raw) as Partial<BookOptions>) } : DEFAULTS;
+    // The old English default was stored as a real title; clear it so the default follows the language.
+    return saved.title === 'My Mosaic Book' ? { ...saved, title: '' } : saved;
   } catch {
     return DEFAULTS;
   }
 }
 
 export function BookView({ query }: { query: URLSearchParams }) {
+  const t = useT();
+  const b = t.book;
   const { mosaics, loading } = useMosaics();
   const [opts, setOpts] = useState<BookOptions>(loadOptions);
   const [order, setOrder] = useState<string[] | null>(null);
@@ -100,13 +105,13 @@ export function BookView({ query }: { query: URLSearchParams }) {
     frontPages.push(
       <Sheet key="howto" className="text-sheet">
         <div className="sheet-head">
-          <h2 className="sheet-title">How to play</h2>
+          <h2 className="sheet-title">{t.sheet.howToPlay}</h2>
         </div>
         <div className="sheet-body text-body">
           {modesUsed.map((m) => (
             <div key={m.id} className="howto-entry">
-              <h3>{m.name}</h3>
-              <p>{m.rules}</p>
+              <h3>{t.modes[m.id].name}</h3>
+              <p>{t.modes[m.id].rules}</p>
             </div>
           ))}
         </div>
@@ -119,14 +124,14 @@ export function BookView({ query }: { query: URLSearchParams }) {
     frontPages.push(
       <Sheet key="contents" className="text-sheet">
         <div className="sheet-head">
-          <h2 className="sheet-title">Contents</h2>
+          <h2 className="sheet-title">{t.sheet.contents}</h2>
         </div>
         <div className="sheet-body text-body">
           <ol className="contents-list">
             {chosen.map((c, i) => (
               <li key={c.id}>
                 <span className="contents-title">
-                  {c.title || 'Untitled mosaic'} <em>{MODE_BY_ID[c.mode].name}</em>
+                  {c.title || t.untitled} <em>{t.modes[c.mode].name}</em>
                 </span>
                 <span className="contents-dots" />
                 <span className="contents-page">{page + 1 + i}</span>
@@ -150,13 +155,13 @@ export function BookView({ query }: { query: URLSearchParams }) {
       solutionPages.push(
         <Sheet key={`sol-${i}`} className="solution-sheet">
           <div className="sheet-head">
-            <h2 className="sheet-title">Solutions</h2>
+            <h2 className="sheet-title">{t.sheet.solutions}</h2>
           </div>
           <div className="sheet-body solutions-grid">
             {pair.map((c, k) => (
               <div key={c.id} className="solution-cell">
                 <div className="solution-label">
-                  <span className="sheet-number small">{i + k + 1}</span> {c.title || 'Untitled mosaic'} <span className="sheet-meta">{puzzleSummary(c.puzzle)}</span>
+                  <span className="sheet-number small">{i + k + 1}</span> {c.title || t.untitled} <span className="sheet-meta">{puzzleSummary(c.puzzle, t)}</span>
                 </div>
                 <div className="solution-svg">
                   <PuzzleSvg puzzle={c.puzzle} solution />
@@ -174,28 +179,28 @@ export function BookView({ query }: { query: URLSearchParams }) {
 
   return (
     <div className="print-layout book-page">
-      <aside className="print-panel no-print" aria-label="Book options">
+      <aside className="print-panel no-print" aria-label={b.options}>
         <div className="print-panel-body">
           <a className="back-link" href={href('/')}>
-            <IconArrowLeft size={16} /> My mosaics
+            <IconArrowLeft size={16} /> {b.back}
           </a>
-          <h1>Print a book</h1>
-          <p className="lead">A cover, a how-to-play page, contents, one puzzle per page and the solutions at the back.</p>
+          <h1>{b.title}</h1>
+          <p className="lead">{b.lead}</p>
 
           <div className="option-group">
             <label className="field">
-              <span>Book title</span>
-              <input value={opts.title} onChange={(e) => set('title', e.target.value)} />
+              <span>{b.bookTitle}</span>
+              <input value={opts.title} onChange={(e) => set('title', e.target.value)} placeholder={b.defaultTitle} />
             </label>
             <label className="field">
-              <span>Subtitle</span>
-              <input value={opts.subtitle} onChange={(e) => set('subtitle', e.target.value)} placeholder="e.g. Puzzles for Grandma" />
+              <span>{b.subtitle}</span>
+              <input value={opts.subtitle} onChange={(e) => set('subtitle', e.target.value)} placeholder={b.subtitlePlaceholder} />
             </label>
             <div className="option-row">
-              <span className="option-label">Paper</span>
+              <span className="option-label">{b.paper}</span>
               <Segmented
                 className="block"
-                label="Paper"
+                label={b.paper}
                 value={opts.paper}
                 onChange={(v) => set('paper', v)}
                 options={[
@@ -207,27 +212,24 @@ export function BookView({ query }: { query: URLSearchParams }) {
           </div>
 
           <div className="option-group">
-            <Toggle label="How-to-play page" checked={opts.includeHowTo} onChange={(v) => set('includeHowTo', v)} />
-            <Toggle label="Contents page" checked={opts.includeContents} onChange={(v) => set('includeContents', v)} />
-            <Toggle label="Rules on each puzzle" checked={opts.showRules} onChange={(v) => set('showRules', v)} />
-            <Toggle label="Solutions at the back" checked={opts.includeSolutions} onChange={(v) => set('includeSolutions', v)} />
+            <Toggle label={b.howTo} checked={opts.includeHowTo} onChange={(v) => set('includeHowTo', v)} />
+            <Toggle label={b.contents} checked={opts.includeContents} onChange={(v) => set('includeContents', v)} />
+            <Toggle label={b.rules} checked={opts.showRules} onChange={(v) => set('showRules', v)} />
+            <Toggle label={b.solutions} checked={opts.includeSolutions} onChange={(v) => set('includeSolutions', v)} />
           </div>
 
           <div className="option-group book-picker">
             <div className="book-picker-head">
               <span className="option-label">
-                Mosaics{' '}
-                <span className="muted">
-                  ({chosen.length} of {mosaics.length})
-                </span>
+                {b.mosaics} <span className="muted">{b.count(chosen.length, mosaics.length)}</span>
               </span>
               {mosaics.length > 0 && (
                 <span className="book-picker-tools">
-                  <button className="link" aria-label="Select all" onClick={() => setSelected(new Set(order ?? []))}>
-                    All
+                  <button className="link" aria-label={b.selectAll} onClick={() => setSelected(new Set(order ?? []))}>
+                    {b.all}
                   </button>
-                  <button className="link" aria-label="Select none" onClick={() => setSelected(new Set())}>
-                    None
+                  <button className="link" aria-label={b.selectNone} onClick={() => setSelected(new Set())}>
+                    {b.none}
                   </button>
                 </span>
               )}
@@ -237,7 +239,7 @@ export function BookView({ query }: { query: URLSearchParams }) {
                 {(order ?? []).map((id, i) => {
                   const m = byId.get(id);
                   if (!m) return null;
-                  const title = m.title || 'Untitled mosaic';
+                  const title = m.title || t.untitled;
                   return (
                     <li key={id} className={selected?.has(id) ? 'on' : ''}>
                       <label>
@@ -245,14 +247,14 @@ export function BookView({ query }: { query: URLSearchParams }) {
                         <img src={m.thumbnail} alt="" />
                         <span className="book-list-text">
                           <span className="book-list-title">{title}</span>
-                          <span className="book-list-mode">{MODE_BY_ID[m.mode].name}</span>
+                          <span className="book-list-mode">{t.modes[m.mode].name}</span>
                         </span>
                       </label>
                       <span className="book-list-actions">
-                        <button className="btn ghost icon-only" aria-label={`Move ${title} up`} title="Move up" onClick={() => move(id, -1)} disabled={i === 0}>
+                        <button className="btn ghost icon-only" aria-label={b.moveUpTitle(title)} title={b.moveUp} onClick={() => move(id, -1)} disabled={i === 0}>
                           <IconArrowUp size={16} />
                         </button>
-                        <button className="btn ghost icon-only" aria-label={`Move ${title} down`} title="Move down" onClick={() => move(id, 1)} disabled={i === (order?.length ?? 0) - 1}>
+                        <button className="btn ghost icon-only" aria-label={b.moveDownTitle(title)} title={b.moveDown} onClick={() => move(id, 1)} disabled={i === (order?.length ?? 0) - 1}>
                           <IconArrowDown size={16} />
                         </button>
                       </span>
@@ -263,18 +265,20 @@ export function BookView({ query }: { query: URLSearchParams }) {
             )}
             {!loading && mosaics.length === 0 && (
               <p className="muted small">
-                You have no saved mosaics yet. <a href={href('/new')}>Make one</a> and it will appear here.
+                {b.emptyBefore}
+                <a href={href('/new')}>{b.emptyLink}</a>
+                {b.emptyAfter}
               </p>
             )}
           </div>
         </div>
         <div className="print-panel-foot">
           <button className="btn primary large block" onClick={() => window.print()} disabled={chosen.length === 0}>
-            <IconPrinter /> {totalPages ? `Print ${totalPages} pages` : 'Print book'}
+            <IconPrinter /> {totalPages ? b.printPages(totalPages) : b.printBook}
           </button>
           <p className="print-tip">
             <IconInfo size={15} />
-            <span>In the print dialog, choose {opts.paper} paper and turn off headers and footers.</span>
+            <span>{t.print.tip(opts.paper)}</span>
           </p>
         </div>
       </aside>
@@ -286,13 +290,13 @@ export function BookView({ query }: { query: URLSearchParams }) {
               <IconBook size={32} />
               {mosaics.length === 0 ? (
                 <>
-                  <p>Your book is built from the mosaics in your gallery.</p>
+                  <p>{b.builtFrom}</p>
                   <a className="btn primary" href={href('/new')}>
-                    <IconPlus /> Make a mosaic
+                    <IconPlus /> {b.makeMosaic}
                   </a>
                 </>
               ) : (
-                <p>Pick at least one mosaic to see the pages of your book.</p>
+                <p>{b.pickOne}</p>
               )}
             </div>
           )
@@ -305,13 +309,13 @@ export function BookView({ query }: { query: URLSearchParams }) {
                     <img key={c.id} src={c.thumbnail} alt="" />
                   ))}
                 </div>
-                <h1 className="cover-title">{opts.title || 'My Mosaic Book'}</h1>
+                <h1 className="cover-title">{opts.title || b.defaultTitle}</h1>
                 {opts.subtitle && <p className="cover-subtitle">{opts.subtitle}</p>}
                 <p className="cover-meta">
-                  {chosen.length} {chosen.length === 1 ? 'puzzle' : 'puzzles'} · {modesUsed.map((m) => m.name).join(', ')}
+                  {t.sheet.puzzles(chosen.length)} · {modesUsed.map((m) => t.modes[m.id].name).join(', ')}
                 </p>
                 <div className="cover-brand">
-                  <Logo size={18} /> Made with Mosaica
+                  <Logo size={18} /> {t.sheet.madeWith}
                 </div>
               </div>
             </Sheet>

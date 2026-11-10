@@ -8,6 +8,7 @@ import { LINEART_MODEL, traceOutlines } from '../lib/ai/lineart';
 import { apply, invert, multiply, scaleOf, scaling, type Affine } from '../lib/transform';
 import { IconBrush, IconCrop, IconInvert, IconSparkles, IconTrash, IconWand } from './Icons';
 import { capture, Segmented, Slider } from './ui';
+import { useT } from '../i18n';
 
 /** Which mask the brush and wand paint: the removed background, or the detail to protect. */
 export type MaskLayer = 'background' | 'detail';
@@ -403,6 +404,8 @@ interface ToolbarProps {
 type AiState = { status: 'idle' } | { status: 'busy'; message: string } | { status: 'error'; message: string };
 
 export function PhotoToolbar({ tools, onTools, mask, detail, lineart, maskBase, cropRatio, ratioFree, onRatio, onResetCrop, onMask, onDetail, onLineart }: ToolbarProps) {
+  const t = useT();
+  const p = t.photo;
   const mw = maskBase.width;
   const mh = maskBase.height;
   const removed = maskCoverage(mask);
@@ -421,7 +424,7 @@ export function PhotoToolbar({ tools, onTools, mask, detail, lineart, maskBase, 
   }, []);
   const runAi = async (job: (progress: (m: string) => void) => Promise<string | null>) => {
     setNotice(null);
-    setAi({ status: 'busy', message: 'Starting…' });
+    setAi({ status: 'busy', message: p.starting });
     try {
       const note = await job((message) => alive.current && setAi({ status: 'busy', message }));
       if (!alive.current) return;
@@ -430,15 +433,15 @@ export function PhotoToolbar({ tools, onTools, mask, detail, lineart, maskBase, 
     } catch (e) {
       if (!alive.current) return;
       const text = e instanceof Error ? e.message : String(e);
-      setAi({ status: 'error', message: /fetch|network|load/i.test(text) ? `Could not load the model (is the device online?). ${text}` : text });
+      setAi({ status: 'error', message: /fetch|network|load/i.test(text) ? p.loadFailed(text) : text });
     }
   };
   const aiSubject = () =>
     runAi(async (progress) => {
       const region = await findSubject(maskBase, tools.subjectModel, progress);
       const share = region.reduce((a, v) => a + v, 0) / region.length;
-      if (share === 0) return 'The model found no background to remove.';
-      if (share > 0.98) return 'The model found no subject in this photo. Try the other model, or the brush.';
+      if (share === 0) return p.noBackground;
+      if (share > 0.98) return p.noSubject;
       // The model decides the whole mask: what it keeps overrides earlier removals.
       onMask(normalizeMask({ width: mw, height: mh, data: region }));
       return null;
@@ -446,30 +449,30 @@ export function PhotoToolbar({ tools, onTools, mask, detail, lineart, maskBase, 
   const aiFace = () =>
     runAi(async (progress) => {
       const found = await findFaceDetails(maskBase, progress);
-      if (!found.faces) return 'No face found. Mark the important parts with the brush instead.';
+      if (!found.faces) return p.noFace;
       onDetail(normalizeMask(combineMask(detail, found.mask, 1, mw, mh)));
-      return `Marked the eyes, brows, nose and mouth of ${found.faces === 1 ? 'one face' : `${found.faces} faces`}.`;
+      return p.facesMarked(found.faces);
     });
   const aiTrace = () =>
     runAi(async (progress) => {
       const ink = await traceOutlines(maskBase, progress);
       const traced = normalizeMask({ width: mw, height: mh, data: ink });
       onLineart(traced);
-      if (!traced) return 'The model drew nothing for this photo.';
-      return 'Traced. The “Outline edges” slider (step 5) now darkens these lines instead of brightness edges.';
+      if (!traced) return p.drewNothing;
+      return p.traced;
     });
   const busy = ai.status === 'busy';
   const autoBackground = () => {
     const region = selectBackground(maskBase, tools.tolerance);
     const share = region.reduce((a, v) => a + v, 0) / region.length;
     if (share === 0) {
-      setNotice('No plain background found along the top and sides. Try a higher tolerance, or use the brush or wand.');
+      setNotice(p.noPlain);
       return;
     }
     onMask(normalizeMask(combineMask(mask, region, 1, mw, mh)));
     setNotice(
       share > 0.7
-        ? `That removed ${Math.round(share * 100)}% of the photo, so the background may not be plain enough. Undo (Ctrl+Z) and lower the tolerance, or paint with the brush instead.`
+        ? p.tooMuch(Math.round(share * 100))
         : null,
     );
   };
@@ -477,61 +480,61 @@ export function PhotoToolbar({ tools, onTools, mask, detail, lineart, maskBase, 
   const hint =
     tools.tool === 'crop'
       ? ratioFree
-        ? 'Drag the corners or edges to crop, drag inside to move, or drag outside to draw a new crop. Pinch or Ctrl+scroll to resize.'
-        : 'The crop keeps the grid’s shape because the grid height is set by hand (step 3). Drag the corners to resize, drag inside to move.'
+        ? p.hintCropFree
+        : p.hintCropFixed
       : onDetailLayer
         ? tools.tool === 'brush'
           ? tools.erase
-            ? 'Paint over the parts the picture is recognised by (eyes, mouth, a logo). They keep their contrast, their colours and their small features.'
-            : 'Paint over marked areas to unmark them.'
+            ? p.hintDetailBrush
+            : p.hintDetailBrushOff
           : tools.erase
-            ? 'Click an area to mark it and everything of a similar colour joined to it as detail.'
-            : 'Click a marked area to unmark it.'
+            ? p.hintDetailWand
+            : p.hintDetailWandOff
         : tools.tool === 'brush'
           ? tools.erase
-            ? 'Paint over anything that should stay blank, like a busy background.'
-            : 'Paint over removed areas to bring them back.'
+            ? p.hintBgBrush
+            : p.hintBgBrushOff
           : tools.erase
-            ? 'Click an area to remove it and everything of a similar colour joined to it.'
-            : 'Click a removed area to bring it back.';
+            ? p.hintBgWand
+            : p.hintBgWandOff;
   return (
-    <div className="stage-tools" role="toolbar" aria-label="Photo tools">
+    <div className="stage-tools" role="toolbar" aria-label={p.tools}>
       <div className="tool-row">
         <Segmented
-          label="Tool"
+          label={p.tool}
           value={tools.tool}
           onChange={(tool) => onTools({ tool })}
           options={[
-            { value: 'crop', label: 'Crop', icon: <IconCrop size={16} /> },
-            { value: 'brush', label: 'Brush', icon: <IconBrush size={16} /> },
-            { value: 'wand', label: 'Wand', icon: <IconWand size={16} /> },
+            { value: 'crop', label: p.crop, icon: <IconCrop size={16} /> },
+            { value: 'brush', label: p.brush, icon: <IconBrush size={16} /> },
+            { value: 'wand', label: p.wand, icon: <IconWand size={16} /> },
           ]}
         />
         {tools.tool !== 'crop' && (
           <Segmented
-            label="Layer"
+            label={p.layer}
             value={tools.layer}
             onChange={(layer) => onTools({ layer })}
             options={[
-              { value: 'background', label: 'Background' },
-              { value: 'detail', label: 'Detail' },
+              { value: 'background', label: p.background },
+              { value: 'detail', label: p.detail },
             ]}
           />
         )}
         {tools.tool !== 'crop' && (
           <Segmented
-            label="Brush mode"
+            label={p.brushMode}
             value={tools.erase ? 'erase' : 'keep'}
             onChange={(v) => onTools({ erase: v === 'erase' })}
             options={
               onDetailLayer
                 ? [
-                    { value: 'erase', label: 'Mark' },
-                    { value: 'keep', label: 'Unmark' },
+                    { value: 'erase', label: p.mark },
+                    { value: 'keep', label: p.unmark },
                   ]
                 : [
-                    { value: 'erase', label: 'Remove' },
-                    { value: 'keep', label: 'Keep' },
+                    { value: 'erase', label: p.remove },
+                    { value: 'keep', label: p.keep },
                   ]
             }
           />
@@ -539,62 +542,62 @@ export function PhotoToolbar({ tools, onTools, mask, detail, lineart, maskBase, 
         {tools.tool === 'crop' && (
           <>
             <label className="field inline">
-              <span>Shape</span>
+              <span>{p.shape}</span>
               <select value={ratioFree ? cropRatio : 'grid'} disabled={!ratioFree} onChange={(e) => onRatio(e.target.value as CropRatio)}>
-                {!ratioFree && <option value="grid">Same as the grid</option>}
+                {!ratioFree && <option value="grid">{p.sameAsGrid}</option>}
                 {CROP_RATIOS.map((r) => (
-                  <option key={r.value} value={r.value}>
-                    {r.label}
+                  <option key={r} value={r}>
+                    {t.cropRatios[r]}
                   </option>
                 ))}
               </select>
             </label>
             <button className="btn small ghost" onClick={onResetCrop}>
-              Reset crop
+              {p.resetCrop}
             </button>
           </>
         )}
         <div className="tool-slider">
-          {tools.tool === 'brush' && <Slider label="Brush size" value={tools.brush} min={0.5} max={8} step={0.5} onChange={(brush) => onTools({ brush })} format={(v) => `${v} cells`} />}
+          {tools.tool === 'brush' && <Slider label={p.brushSize} value={tools.brush} min={0.5} max={8} step={0.5} onChange={(brush) => onTools({ brush })} format={p.nCells} />}
         </div>
       </div>
       {tools.tool !== 'crop' && onDetailLayer ? (
         <div className="tool-row">
-          <button className="btn small" onClick={aiFace} disabled={busy} title="Find faces and mark their eyes, brows, nose and mouth (runs in your browser)">
-            <IconSparkles size={16} /> Find face details
+          <button className="btn small" onClick={aiFace} disabled={busy} title={p.findFaceTitle}>
+            <IconSparkles size={16} /> {p.findFace}
           </button>
           <button className="btn small ghost" onClick={() => onDetail(null)} disabled={!detail}>
-            <IconTrash size={16} /> Clear
+            <IconTrash size={16} /> {p.clear}
           </button>
-          {marked > 0 && <span className="tool-note">{Math.round(marked * 100)}% marked</span>}
+          {marked > 0 && <span className="tool-note">{p.marked(Math.round(marked * 100))}</span>}
         </div>
       ) : (
         <>
           <div className="tool-row">
-            <button className="btn small" onClick={autoBackground} disabled={busy} title="Remove the plain background around the subject (colour flood fill)">
-              <IconSparkles size={16} /> Remove plain background
+            <button className="btn small" onClick={autoBackground} disabled={busy} title={p.removePlainTitle}>
+              <IconSparkles size={16} /> {p.removePlain}
             </button>
             <div className="tool-slider">
-              <Slider label="Tolerance" value={tools.tolerance} min={1} max={100} onChange={(tolerance) => onTools({ tolerance })} format={(v) => (v < 20 ? `${v} · strict` : v > 60 ? `${v} · loose` : String(v))} />
+              <Slider label={p.tolerance} value={tools.tolerance} min={1} max={100} onChange={(tolerance) => onTools({ tolerance })} format={(v) => (v < 20 ? `${v} · ${p.strict}` : v > 60 ? `${v} · ${p.loose}` : String(v))} />
             </div>
-            <button className="btn small" onClick={() => onMask(normalizeMask(invertMask(mask, mw, mh)))} title="Swap removed and kept areas">
-              <IconInvert size={16} /> Invert
+            <button className="btn small" onClick={() => onMask(normalizeMask(invertMask(mask, mw, mh)))} title={p.invertTitle}>
+              <IconInvert size={16} /> {p.invert}
             </button>
             <button className="btn small ghost" onClick={() => onMask(null)} disabled={!mask}>
-              <IconTrash size={16} /> Clear
+              <IconTrash size={16} /> {p.clear}
             </button>
-            {removed > 0 && <span className="tool-note">{Math.round(removed * 100)}% removed</span>}
+            {removed > 0 && <span className="tool-note">{p.removed(Math.round(removed * 100))}</span>}
           </div>
           <div className="tool-row">
-            <button className="btn small" onClick={aiSubject} disabled={busy} title="Let a neural network find the subject and remove everything else (runs in your browser; the model is downloaded once)">
-              <IconSparkles size={16} /> Find the subject
+            <button className="btn small" onClick={aiSubject} disabled={busy} title={p.findSubjectTitle}>
+              <IconSparkles size={16} /> {p.findSubject}
             </button>
             <label className="field inline">
-              <span>Model</span>
-              <select value={tools.subjectModel} disabled={busy} onChange={(e) => onTools({ subjectModel: e.target.value as SubjectModel })} title={SUBJECT_MODELS[tools.subjectModel].note}>
+              <span>{p.model}</span>
+              <select value={tools.subjectModel} disabled={busy} onChange={(e) => onTools({ subjectModel: e.target.value as SubjectModel })} title={p.models[tools.subjectModel].note}>
                 {(Object.keys(SUBJECT_MODELS) as SubjectModel[]).map((k) => (
                   <option key={k} value={k}>
-                    {SUBJECT_MODELS[k].label}
+                    {p.models[k].label}
                   </option>
                 ))}
               </select>
@@ -607,14 +610,14 @@ export function PhotoToolbar({ tools, onTools, mask, detail, lineart, maskBase, 
           className="btn small"
           onClick={aiTrace}
           disabled={busy}
-          title={`Draw the photo's outlines with a line-art network (${LINEART_MODEL.label}, runs in your browser; the model is downloaded once). “Outline edges” then darkens the traced lines.`}
+          title={p.traceTitle(LINEART_MODEL.label)}
         >
-          <IconSparkles size={16} /> Trace outlines
+          <IconSparkles size={16} /> {p.trace}
         </button>
         <button className="btn small ghost" onClick={() => onLineart(null)} disabled={!lineart}>
-          <IconTrash size={16} /> Clear trace
+          <IconTrash size={16} /> {p.clearTrace}
         </button>
-        {inked > 0 && <span className="tool-note">{inked < 0.005 ? 'under 1' : Math.round(inked * 100)}% inked</span>}
+        {inked > 0 && <span className="tool-note">{p.inked(inked < 0.005 ? p.under1 : String(Math.round(inked * 100)))}</span>}
       </div>
       {ai.status !== 'idle' ? (
         <p className={`hint ${ai.status === 'error' ? 'warn' : 'ai-busy'}`} role="status" aria-live="polite">

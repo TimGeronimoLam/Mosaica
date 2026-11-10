@@ -7,13 +7,13 @@ import { applyEdits, editCount, type CellEdits } from '../lib/edits';
 import { CROP_RATIOS, currentBox, dragRatio, largestBox, ratioValue, reconcile, withRatio, type CropRatio } from '../lib/crop';
 import { createCropRenderer, cropRect, loadImageElement, prepareSourceBlob, rasterize, renderTransformed, type SourceRaster } from '../lib/image';
 import { MASK_MAX, decodeMask, encodeMask, maskCoverage, resizeMask, transformMask, transformMaskMax, type PhotoMask } from '../lib/mask';
-import { MODES, MODE_BY_ID, defaultSettings, generatePuzzle, loadSettings, normalizeSettings } from '../lib/modes';
+import { MODES, MODE_BY_ID, defaultSettings, editorPath, generatePuzzle, loadSettings, normalizeSettings } from '../lib/modes';
 import { pixelize, suggestThreshold } from '../lib/pixelize';
 import { makeSampler } from '../lib/sampler';
 import { randomSeed } from '../lib/rng';
 import { renderThumbnail } from '../lib/thumbnail';
 import { flipView, rotateView, transformedAspect } from '../lib/transform';
-import { navigate } from '../router';
+import { href, navigate } from '../router';
 import { Logo } from './Header';
 import {
   IconChevronDown,
@@ -43,6 +43,7 @@ import { DEFAULT_PIXEL_TOOLS, PixelStage, PixelToolbar, type PixelTools } from '
 import { PuzzleSvg, puzzleSummary } from './PuzzleSvg';
 import { analyzeNonogram, type NonogramAnalysis } from '../lib/modes/nonogramSolver';
 import { Segmented, Slider, Toggle } from './ui';
+import { tr, useT, type Messages } from '../i18n';
 
 interface Source {
   blob: Blob;
@@ -139,6 +140,8 @@ function useNarrow() {
 }
 
 export function Editor({ id }: { id: string | null }) {
+  const t = useT();
+  const e_ = t.editor;
   const [loading, setLoading] = useState(!!id);
   const [error, setError] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -175,7 +178,12 @@ export function Editor({ id }: { id: string | null }) {
     (async () => {
       try {
         const rec = await getMosaic(id);
-        if (!rec) throw new Error('This mosaic no longer exists.');
+        if (!rec) throw new Error(tr().errors.mosaicGone);
+        if (MODE_BY_ID[rec.mode]?.standalone) {
+          // Made in its own editor; a stale /edit link lands there instead.
+          window.location.replace(href(editorPath(rec.mode, id)));
+          return;
+        }
         const img = await loadImageElement(rec.source);
         if (cancelled) return;
         const src = makeSource(rec.source, img);
@@ -236,6 +244,11 @@ export function Editor({ id }: { id: string | null }) {
 
   const changeMode = (m: ModeId) => {
     const d = MODE_BY_ID[m];
+    if (d.standalone) {
+      // A whodunit is built from several photos in its own editor.
+      if (!dirty || window.confirm(t.whodunit.leave)) navigate(editorPath(m));
+      return;
+    }
     setDoc((prev) => {
       const next = { ...prev.settings, ...d.force, gridWidth: d.defaultWidth };
       next.gridHeight = Math.max(2, Math.round((prev.settings.gridHeight / prev.settings.gridWidth) * next.gridWidth));
@@ -259,7 +272,7 @@ export function Editor({ id }: { id: string | null }) {
   const onFile = async (file: File | undefined) => {
     if (!file) return;
     if (!file.type.startsWith('image/')) {
-      setError('Please choose an image file (PNG, JPEG, WebP, GIF…).');
+      setError(t.errors.notImage);
       return;
     }
     try {
@@ -402,7 +415,7 @@ export function Editor({ id }: { id: string | null }) {
     if (recId) navigate(`/print/${recId}`);
   };
 
-  if (loading) return <div className="page narrow muted">Loading mosaic…</div>;
+  if (loading) return <div className="page narrow muted">{e_.loading}</div>;
 
   const crop = photo ? cropRect(photo.raster, settings.gridWidth, settings.gridHeight, settings) : null;
   const A = photo ? photo.raster.width / photo.raster.height : 1;
@@ -472,47 +485,47 @@ export function Editor({ id }: { id: string | null }) {
       />
 
       <div className="editor-toolbar">
-        <input className="title-input" value={title} placeholder="Untitled mosaic" aria-label="Mosaic title" onChange={(e) => setTitle(e.target.value)} />
+        <input className="title-input" value={title} placeholder={e_.titlePlaceholder} aria-label={e_.titleLabel} onChange={(e) => setTitle(e.target.value)} />
         <span className={`save-state ${saveState}`} role="status">
-          {saving ? 'Saving…' : dirty ? 'Unsaved' : savedAt ? `Saved ${new Date(savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}
+          {saving ? e_.saving : dirty ? e_.unsaved : savedAt ? e_.saved(new Date(savedAt).toLocaleTimeString(t.locale, { hour: '2-digit', minute: '2-digit' })) : ''}
         </span>
-        <div className="history-buttons" role="group" aria-label="History">
-          <button className="btn ghost icon-only" onClick={history.undo} disabled={!history.canUndo} aria-label="Undo" title="Undo (Ctrl+Z)">
+        <div className="history-buttons" role="group" aria-label={e_.history}>
+          <button className="btn ghost icon-only" onClick={history.undo} disabled={!history.canUndo} aria-label={e_.undo} title={e_.undoTitle}>
             <IconUndo size={18} />
           </button>
-          <button className="btn ghost icon-only" onClick={history.redo} disabled={!history.canRedo} aria-label="Redo" title="Redo (Ctrl+Shift+Z)">
+          <button className="btn ghost icon-only" onClick={history.redo} disabled={!history.canRedo} aria-label={e_.redo} title={e_.redoTitle}>
             <IconRedo size={18} />
           </button>
         </div>
         <div className="editor-actions">
           <Segmented
             className="pane-switch"
-            label="Show"
+            label={e_.show}
             value={pane}
             onChange={(v) => {
               setPane(v);
               window.scrollTo({ top: 0 });
             }}
             options={[
-              { value: 'edit', label: 'Edit', icon: <IconSliders size={16} /> },
-              { value: 'preview', label: 'Preview', icon: <IconEye size={16} /> },
+              { value: 'edit', label: e_.edit, icon: <IconSliders size={16} /> },
+              { value: 'preview', label: e_.preview, icon: <IconEye size={16} /> },
             ]}
           />
-          <button className="btn" onClick={() => void save()} disabled={!source || saving} title="Save (Ctrl+S)">
+          <button className="btn" onClick={() => void save()} disabled={!source || saving} title={e_.saveTitle}>
             <IconSave size={17} />
-            <span>Save</span>
+            <span>{e_.save}</span>
           </button>
           <button className="btn primary" onClick={() => void print()} disabled={!source || saving}>
             <IconPrinter size={17} />
-            <span>Print…</span>
+            <span>{e_.print}</span>
           </button>
         </div>
       </div>
 
-      <aside className="sidebar" aria-label="Mosaic settings">
+      <aside className="sidebar" aria-label={e_.settings}>
         <section className="panel">
           <h2 className="panel-title">
-            <span className="step">1</span> Image
+            <span className="step">1</span> {e_.stepImage}
           </h2>
           <div
             className={`dropzone ${dragOver ? 'over' : ''} ${source ? 'has-image' : ''}`}
@@ -529,8 +542,8 @@ export function Editor({ id }: { id: string | null }) {
             onClick={() => (source ? openView('photo') : chooseFile())}
             role="button"
             tabIndex={0}
-            aria-label={source ? 'Edit the photo: crop and remove background' : 'Choose an image'}
-            title={source ? 'Crop and remove background' : undefined}
+            aria-label={source ? e_.editPhoto : e_.chooseImage}
+            title={source ? e_.editPhotoTitle : undefined}
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
@@ -546,41 +559,41 @@ export function Editor({ id }: { id: string | null }) {
                 <span className="dropzone-icon">
                   <IconUpload size={22} />
                 </span>
-                <strong>Drop an image here</strong>
-                <span>or choose a photo, a drawing or a logo</span>
+                <strong>{e_.dropHere}</strong>
+                <span>{e_.dropSub}</span>
               </div>
             )}
           </div>
           {source && (
             <>
               <div className="panel-row">
-                <div className="icon-group" role="group" aria-label="Orientation">
-                  <button className="btn small icon-only" onClick={() => turn(-1)} aria-label="Rotate left" title="Rotate left">
+                <div className="icon-group" role="group" aria-label={e_.orientation}>
+                  <button className="btn small icon-only" onClick={() => turn(-1)} aria-label={e_.rotateLeft} title={e_.rotateLeft}>
                     <IconRotateLeft size={17} />
                   </button>
-                  <button className="btn small icon-only" onClick={() => turn(1)} aria-label="Rotate right" title="Rotate right">
+                  <button className="btn small icon-only" onClick={() => turn(1)} aria-label={e_.rotateRight} title={e_.rotateRight}>
                     <IconRotateRight size={17} />
                   </button>
-                  <button className="btn small icon-only" onClick={() => update(flipView(settings, 'h'))} aria-label="Mirror left to right" title="Mirror left to right" aria-pressed={settings.flipH}>
+                  <button className="btn small icon-only" onClick={() => update(flipView(settings, 'h'))} aria-label={e_.mirror} title={e_.mirror} aria-pressed={settings.flipH}>
                     <IconFlipH size={17} />
                   </button>
-                  <button className="btn small icon-only" onClick={() => update(flipView(settings, 'v'))} aria-label="Flip upside down" title="Flip upside down" aria-pressed={settings.flipV}>
+                  <button className="btn small icon-only" onClick={() => update(flipView(settings, 'v'))} aria-label={e_.flip} title={e_.flip} aria-pressed={settings.flipV}>
                     <IconFlipV size={17} />
                   </button>
                 </div>
                 <button className="btn small" onClick={chooseFile}>
-                  <IconImage size={16} /> Replace
+                  <IconImage size={16} /> {e_.replace}
                 </button>
               </div>
-              <Slider label="Straighten" value={settings.straighten} min={-45} max={45} step={0.5} onChange={slide('straighten')} format={(v) => `${v > 0 ? '+' : ''}${v}°`} />
+              <Slider label={e_.straighten} value={settings.straighten} min={-45} max={45} step={0.5} onChange={slide('straighten')} format={(v) => `${v > 0 ? '+' : ''}${v}°`} />
               <div className="panel-row">
                 <label className="field inline">
-                  <span>Crop shape</span>
+                  <span>{e_.cropShape}</span>
                   <select value={settings.lockAspect ? settings.cropRatio : 'grid'} disabled={!settings.lockAspect} onChange={(e) => setCropRatio(e.target.value as CropRatio)}>
-                    {!settings.lockAspect && <option value="grid">Same as the grid</option>}
+                    {!settings.lockAspect && <option value="grid">{e_.sameAsGrid}</option>}
                     {CROP_RATIOS.map((r) => (
-                      <option key={r.value} value={r.value}>
-                        {r.label}
+                      <option key={r} value={r}>
+                        {t.cropRatios[r]}
                       </option>
                     ))}
                   </select>
@@ -588,14 +601,18 @@ export function Editor({ id }: { id: string | null }) {
               </div>
               <div className="panel-row">
                 <button className="btn small" onClick={openCrop}>
-                  <IconCrop size={16} /> Crop…
+                  <IconCrop size={16} /> {e_.crop}
                 </button>
                 <button className="btn small ghost" onClick={resetCrop}>
-                  Reset crop
+                  {e_.resetCrop}
                 </button>
               </div>
               <p className="hint">
-                Crop to any shape in the <button className="link" onClick={openCrop}>Photo view</button>, where you can also remove a busy background. A tight crop gives each detail more cells.
+                {e_.cropHintBefore}
+                <button className="link" onClick={openCrop}>
+                  {e_.cropHintLink}
+                </button>
+                {e_.cropHintAfter}
               </p>
             </>
           )}
@@ -603,59 +620,60 @@ export function Editor({ id }: { id: string | null }) {
 
         <section className="panel">
           <h2 className="panel-title">
-            <span className="step">2</span> Puzzle type
+            <span className="step">2</span> {e_.stepType}
           </h2>
           <div className="mode-list">
             {MODES.map((m) => (
-              <button key={m.id} className={`mode-card ${m.id === mode ? 'active' : ''}`} aria-pressed={m.id === mode} title={m.tagline} onClick={() => changeMode(m.id)}>
+              <button key={m.id} className={`mode-card ${m.id === mode ? 'active' : ''}`} aria-pressed={m.id === mode} title={t.modes[m.id].tagline} onClick={() => changeMode(m.id)}>
                 <ModeBadge mode={m.id} size={30} />
-                <span>{m.name}</span>
+                <span>{t.modes[m.id].name}</span>
               </button>
             ))}
           </div>
           <p className="mode-desc">
-            <strong>{def.name}.</strong> {def.tagline}
+            <strong>{t.modes[mode].name}.</strong> {t.modes[mode].tagline}
           </p>
         </section>
 
         <section className="panel">
           <h2 className="panel-title">
-            <span className="step">3</span> Grid
+            <span className="step">3</span> {e_.stepGrid}
           </h2>
-          <Slider label="Width (cells)" value={settings.gridWidth} min={5} max={def.maxWidth} onChange={slide('gridWidth')} />
-          {!settings.lockAspect && <Slider label="Height (cells)" value={settings.gridHeight} min={5} max={Math.round(def.maxWidth * 1.5)} onChange={slide('gridHeight')} />}
+          <Slider label={e_.width} value={settings.gridWidth} min={5} max={def.maxWidth} onChange={slide('gridWidth')} />
+          {!settings.lockAspect && <Slider label={e_.height} value={settings.gridHeight} min={5} max={Math.round(def.maxWidth * 1.5)} onChange={slide('gridHeight')} />}
           <Toggle
-            label="Height follows the crop"
+            label={e_.heightFollows}
             checked={settings.lockAspect}
             onChange={(v) => update({ lockAspect: v })}
-            hint="Off: set the height yourself and the crop keeps the grid's shape."
+            hint={e_.heightFollowsHint}
           />
           <span className="size-chip">
-            {settings.gridWidth} × {settings.gridHeight} cells{mode === 'labymage' ? ` · maze ${settings.gridWidth * 2} × ${settings.gridHeight * 2}` : ''}
+            {e_.cells(settings.gridWidth, settings.gridHeight)}
+            {mode === 'labymage' ? e_.mazeSize(settings.gridWidth * 2, settings.gridHeight * 2) : ''}
           </span>
           <div className="field">
-            <span>Each cell takes</span>
+            <span>{e_.cellTakes}</span>
             <Segmented
               className="block"
-              label="Each cell takes"
+              label={e_.cellTakes}
               value={settings.cellColor}
               onChange={(v) => update({ cellColor: v })}
               options={[
-                { value: 'main', label: 'Its main colour' },
-                { value: 'average', label: 'The average' },
+                { value: 'main', label: e_.mainColour },
+                { value: 'average', label: e_.average },
               ]}
             />
             <span className="hint">
               {settings.cellColor === 'main'
-                ? 'A cell on an edge takes the colour of the larger side, so edges stay crisp.'
-                : 'Every cell blends all of its pixels, giving softer edges.'}
+                ? e_.mainHint
+                : e_.averageHint}
             </span>
           </div>
           {settings.converter < 2 && (
             <div className="alert info compact">
-              <span>Made with the earlier converter, so it regenerates exactly as saved.</span>
+              <span>{e_.legacy}</span>
               <button className="link" onClick={upgradeConverter}>
-                Use the sharper converter
+                {e_.upgrade}
               </button>
             </div>
           )}
@@ -663,72 +681,72 @@ export function Editor({ id }: { id: string | null }) {
 
         <section className="panel">
           <h2 className="panel-title">
-            <span className="step">4</span> {def.name} settings
+            <span className="step">4</span> {e_.modeSettings(t.modes[mode].name)}
           </h2>
           {show('threshold') && isBinary && (
             <>
-              <Slider label="Ink threshold" value={settings.threshold} min={5} max={95} onChange={slide('threshold')} format={(v) => `${v}%`} />
+              <Slider label={e_.threshold} value={settings.threshold} min={5} max={95} onChange={slide('threshold')} format={(v) => `${v}%`} />
               <div className="panel-row tight">
-                <button className="btn small" onClick={autoThreshold} title="Pick the cut that best separates the photo's dark and light parts (Otsu's method)">
-                  <IconSparkles size={16} /> Auto threshold
+                <button className="btn small" onClick={autoThreshold} title={e_.autoThresholdTitle}>
+                  <IconSparkles size={16} /> {e_.autoThreshold}
                 </button>
               </div>
             </>
           )}
-          {show('colors') && !isBinary && <Slider label="Colours" value={settings.colors} min={2} max={16} onChange={slide('colors')} />}
+          {show('colors') && !isBinary && <Slider label={e_.colours} value={settings.colors} min={2} max={16} onChange={slide('colors')} />}
           {show('blankLightest') && !isBinary && (
-            <Toggle label="Lightest colour stays white" checked={settings.blankLightest} onChange={(v) => update({ blankLightest: v })} hint="The lightest colour becomes code 0 and is left unpainted." />
+            <Toggle label={e_.lightestWhite} checked={settings.blankLightest} onChange={(v) => update({ blankLightest: v })} hint={e_.lightestWhiteHint} />
           )}
           {show('dither') &&
             (settings.converter < 2 || def.kind(settings) === 'mystery' ? (
-              <Toggle label="Dither (textured shading)" checked={settings.dither} onChange={(v) => update({ dither: v })} />
+              <Toggle label={e_.dither} checked={settings.dither} onChange={(v) => update({ dither: v })} />
             ) : (
               <div className="field">
-                <span>Shading</span>
+                <span>{e_.shading}</span>
                 <Segmented
                   className="block"
-                  label="Shading"
+                  label={e_.shading}
                   value={ditherValue}
                   onChange={(v) => update(v === 'off' ? { dither: false } : { dither: true, ditherStyle: v })}
                   options={[
-                    { value: 'off', label: 'Flat' },
-                    { value: 'pattern', label: 'Pattern' },
-                    { value: 'diffusion', label: 'Speckle' },
+                    { value: 'off', label: e_.flat },
+                    { value: 'pattern', label: e_.pattern },
+                    { value: 'diffusion', label: e_.speckle },
                   ]}
                 />
               </div>
             ))}
-          {show('dither') && settings.dither && <Slider label="Shading strength" value={settings.ditherAmount} min={10} max={100} step={5} onChange={slide('ditherAmount')} format={(v) => `${v}%`} />}
+          {show('dither') && settings.dither && <Slider label={e_.shadingStrength} value={settings.ditherAmount} min={10} max={100} step={5} onChange={slide('ditherAmount')} format={(v) => `${v}%`} />}
           {def.kind(settings) !== 'mystery' && (
             <>
               <Slider
-                label="Merge areas smaller than"
+                label={e_.mergeSmaller}
                 value={settings.minRegion}
                 min={0}
                 max={12}
                 onChange={slide('minRegion')}
-                format={(v) => (settings.dither ? 'off while shading' : v < 2 ? 'off' : `${v} cells`)}
+                format={(v) => (settings.dither ? e_.offWhileShading : v < 2 ? e_.off : e_.nCells(v))}
               />
-              <p className="hint">Tiny islands of one or two cells are mostly photo noise and tedious to colour; they join the area around them.</p>
+              <p className="hint">{e_.mergeHint}</p>
             </>
           )}
           {show('labelStyle') && (
             <>
               <label className="field">
-                <span>Cell labels</span>
+                <span>{e_.cellLabels}</span>
                 <select value={settings.labelStyle} onChange={(e) => update({ labelStyle: e.target.value as MosaicSettings['labelStyle'] })}>
-                  <option value="number">Numbers</option>
-                  <option value="sums">Little sums (maths practice)</option>
+                  <option value="number">{e_.numbers}</option>
+                  <option value="sums">{e_.sums}</option>
                 </select>
               </label>
               {settings.labelStyle === 'sums' && (
                 <label className="field">
-                  <span>Operations</span>
+                  <span>{e_.operations}</span>
                   <select value={settings.sumOps} onChange={(e) => update({ sumOps: e.target.value as MosaicSettings['sumOps'] })}>
-                    <option value="add">Addition only</option>
-                    <option value="addsub">Addition and subtraction</option>
-                    <option value="mul">Multiplication and division</option>
-                    <option value="mixed">Everything</option>
+                    <option value="add">{e_.opAdd}</option>
+                    <option value="addsub">{e_.opAddSub}</option>
+                    <option value="mul">{e_.opMul}</option>
+                    <option value="mixed">{e_.opMixed}</option>
                   </select>
                 </label>
               )}
@@ -736,99 +754,99 @@ export function Editor({ id }: { id: string | null }) {
           )}
           {show('dots') && (
             <>
-              <Slider label="Detail (smaller = more dots)" value={settings.dotsDetail} min={0.3} max={4} step={0.1} onChange={slide('dotsDetail')} format={(v) => v.toFixed(1)} />
-              <Slider label="Ignore blobs smaller than" value={settings.dotsMinRegion} min={1} max={60} onChange={slide('dotsMinRegion')} format={(v) => `${v} cells`} />
-              <Slider label="Longest gap between dots" value={settings.dotsMaxGap} min={1} max={12} step={0.5} onChange={slide('dotsMaxGap')} format={(v) => `${v} cells`} />
-              <Slider label="Maximum dots" value={settings.dotsMaxDots} min={20} max={600} step={10} onChange={slide('dotsMaxDots')} />
+              <Slider label={e_.dotsDetail} value={settings.dotsDetail} min={0.3} max={4} step={0.1} onChange={slide('dotsDetail')} format={(v) => v.toFixed(1)} />
+              <Slider label={e_.dotsMinRegion} value={settings.dotsMinRegion} min={1} max={60} onChange={slide('dotsMinRegion')} format={e_.nCells} />
+              <Slider label={e_.dotsMaxGap} value={settings.dotsMaxGap} min={1} max={12} step={0.5} onChange={slide('dotsMaxGap')} format={e_.nCells} />
+              <Slider label={e_.dotsMax} value={settings.dotsMaxDots} min={20} max={600} step={10} onChange={slide('dotsMaxDots')} />
             </>
           )}
           {show('logipix') && (
             <>
-              <Toggle label="Colour version" checked={settings.logipixColor} onChange={(v) => update({ logipixColor: v })} />
-              <Slider label="Longest path" value={settings.logipixMaxLen} min={2} max={12} onChange={slide('logipixMaxLen')} />
+              <Toggle label={e_.colourVersion} checked={settings.logipixColor} onChange={(v) => update({ logipixColor: v })} />
+              <Slider label={e_.longestPath} value={settings.logipixMaxLen} min={2} max={12} onChange={slide('logipixMaxLen')} />
             </>
           )}
           {show('fillapix') && (
             <label className="field">
-              <span>Difficulty</span>
+              <span>{e_.difficulty}</span>
               <select value={settings.fillapixDifficulty} onChange={(e) => update({ fillapixDifficulty: e.target.value as MosaicSettings['fillapixDifficulty'] })}>
-                <option value="easy">Easy (one clue at a time)</option>
-                <option value="normal">Normal (combine clues)</option>
+                <option value="easy">{e_.easy}</option>
+                <option value="normal">{e_.normal}</option>
               </select>
             </label>
           )}
-          {show('maze') && <Slider label="Corridor twistiness" value={settings.mazeTwist} min={0} max={100} onChange={slide('mazeTwist')} format={(v) => `${v}%`} />}
+          {show('maze') && <Slider label={e_.twist} value={settings.mazeTwist} min={0} max={100} onChange={slide('mazeTwist')} format={(v) => `${v}%`} />}
           {usesSeed && (
             <div className="panel-row">
               <button className="btn small" onClick={() => update({ seed: randomSeed() })}>
-                <IconShuffle size={16} /> Shuffle
+                <IconShuffle size={16} /> {e_.shuffle}
               </button>
-              <span className="hint">Try a new random variation</span>
+              <span className="hint">{e_.shuffleHint}</span>
             </div>
           )}
         </section>
 
         <section className="panel">
           <h2 className="panel-title">
-            <span className="step">5</span> Photo clean-up
+            <span className="step">5</span> {e_.stepCleanup}
           </h2>
           <div className="panel-row">
-            <button className="btn small" onClick={autoFix} disabled={!source} title="Even out lighting, simplify textures, keep small dark details and restore contrast">
-              <IconSparkles size={16} /> Auto-fix photo
+            <button className="btn small" onClick={autoFix} disabled={!source} title={e_.autoFixTitle}>
+              <IconSparkles size={16} /> {e_.autoFix}
             </button>
             <button className="btn small ghost" onClick={() => update(CLEANUP_DEFAULTS)} disabled={cleanupIsDefault}>
-              Reset
+              {e_.reset}
             </button>
           </div>
-          <Toggle label="Auto levels" checked={settings.autoLevels} onChange={(v) => update({ autoLevels: v })} hint="Stretch the darkest and lightest parts of the crop to black and white." />
-          <Slider label="Brightness" value={settings.brightness} min={-100} max={100} onChange={slide('brightness')} />
-          <Slider label="Contrast" value={settings.contrast} min={-100} max={100} onChange={slide('contrast')} />
-          {!isBinary && <Slider label="Saturation" value={settings.saturation} min={-100} max={100} onChange={slide('saturation')} />}
-          <Slider label="Even out lighting" value={settings.localContrast} min={0} max={100} onChange={slide('localContrast')} format={pct} />
-          <Slider label="Simplify textures" value={settings.smooth} min={0} max={100} onChange={slide('smooth')} format={pct} />
-          <Slider label="Keep dark details" value={settings.darkDetails} min={0} max={100} onChange={slide('darkDetails')} format={pct} />
-          <Slider label="Restore contrast" value={settings.restoreContrast} min={0} max={100} onChange={slide('restoreContrast')} format={pct} />
-          <p className="hint">Averaging a whole cell washes out anything thinner than a cell. This gives the cells back the contrast the photo had there, so eyes and thin lines still show.</p>
-          <Slider label={doc.lineart ? 'Outline edges (traced)' : 'Outline edges'} value={settings.outlines} min={0} max={100} onChange={slide('outlines')} format={pct} />
-          {doc.lineart && <p className="hint">Darkens the cells the traced outlines run through. Clear the trace in the Photo view to go back to brightness edges.</p>}
+          <Toggle label={e_.autoLevels} checked={settings.autoLevels} onChange={(v) => update({ autoLevels: v })} hint={e_.autoLevelsHint} />
+          <Slider label={e_.brightness} value={settings.brightness} min={-100} max={100} onChange={slide('brightness')} />
+          <Slider label={e_.contrast} value={settings.contrast} min={-100} max={100} onChange={slide('contrast')} />
+          {!isBinary && <Slider label={e_.saturation} value={settings.saturation} min={-100} max={100} onChange={slide('saturation')} />}
+          <Slider label={e_.evenLighting} value={settings.localContrast} min={0} max={100} onChange={slide('localContrast')} format={pct} />
+          <Slider label={e_.simplify} value={settings.smooth} min={0} max={100} onChange={slide('smooth')} format={pct} />
+          <Slider label={e_.darkDetails} value={settings.darkDetails} min={0} max={100} onChange={slide('darkDetails')} format={pct} />
+          <Slider label={e_.restoreContrast} value={settings.restoreContrast} min={0} max={100} onChange={slide('restoreContrast')} format={pct} />
+          <p className="hint">{e_.restoreHint}</p>
+          <Slider label={doc.lineart ? e_.outlinesTraced : e_.outlines} value={settings.outlines} min={0} max={100} onChange={slide('outlines')} format={pct} />
+          {doc.lineart && <p className="hint">{e_.outlinesHint}</p>}
           {(settings.despeckle > 0 || settings.converter < 2) && (
-            <Slider label="Remove specks" value={settings.despeckle} min={0} max={3} onChange={slide('despeckle')} format={(v) => (v === 0 ? 'off' : `${v}`)} />
+            <Slider label={e_.despeckle} value={settings.despeckle} min={0} max={3} onChange={slide('despeckle')} format={(v) => (v === 0 ? e_.off : `${v}`)} />
           )}
-          <Toggle label="Invert" checked={settings.invert} onChange={(v) => update({ invert: v })} />
+          <Toggle label={e_.invert} checked={settings.invert} onChange={(v) => update({ invert: v })} />
           {source && (
             <div className="cleanup-status">
               <div>
-                <span>{removedShare > 0 ? `Background: ${Math.round(removedShare * 100)}% removed` : 'Background: kept'}</span>
+                <span>{removedShare > 0 ? e_.bgRemoved(Math.round(removedShare * 100)) : e_.bgKept}</span>
                 <button className="link" onClick={() => openView('photo')}>
-                  {removedShare > 0 ? 'Edit' : 'Remove…'}
+                  {removedShare > 0 ? e_.editLink : e_.removeLink}
                 </button>
               </div>
               <div>
-                <span title="Areas whose contrast, colours and small features the converter protects">
-                  {detailShare > 0 ? `Detail: ${detailShare < 0.005 ? 'under 1' : Math.round(detailShare * 100)}% marked` : 'Detail: nothing marked'}
+                <span title={e_.detailTitle}>
+                  {detailShare > 0 ? e_.detailMarked(detailShare < 0.005 ? e_.under1 : String(Math.round(detailShare * 100))) : e_.detailNone}
                 </span>
                 <button className="link" onClick={openDetail}>
-                  {detailShare > 0 ? 'Edit' : 'Mark…'}
+                  {detailShare > 0 ? e_.editLink : e_.markLink}
                 </button>
               </div>
               <div>
-                <span title="Outlines drawn by the line-art network, which Outline edges darkens">{doc.lineart ? 'Outlines: traced' : 'Outlines: not traced'}</span>
+                <span title={e_.outlinesTitle}>{doc.lineart ? e_.outlinesYes : e_.outlinesNo}</span>
                 <button className="link" onClick={() => openView('photo')}>
-                  {doc.lineart ? 'Edit' : 'Trace…'}
+                  {doc.lineart ? e_.editLink : e_.traceLink}
                 </button>
               </div>
               <div>
-                <span>{touchUps ? `${touchUps} cell${touchUps === 1 ? '' : 's'} touched up` : 'No touch-ups'}</span>
+                <span>{touchUps ? e_.touchUps(touchUps) : e_.noTouchUps}</span>
                 <button className="link" onClick={() => openView('pixels')}>
-                  {touchUps ? 'Edit' : 'Touch up…'}
+                  {touchUps ? e_.editLink : e_.touchUpLink}
                 </button>
               </div>
             </div>
           )}
           {pixelPreview && (
             <div className="pixel-preview">
-              <span className="pixel-preview-label">Pixel art</span>
-              <img src={pixelPreview} alt="Pixel art preview" />
+              <span className="pixel-preview-label">{e_.pixelArt}</span>
+              <img src={pixelPreview} alt={e_.pixelArtAlt} />
             </div>
           )}
         </section>
@@ -839,7 +857,7 @@ export function Editor({ id }: { id: string | null }) {
           <div className="alert" role="alert">
             <span>{error}</span>
             <button className="link" onClick={() => setError(null)}>
-              Dismiss
+              {t.dismiss}
             </button>
           </div>
         )}
@@ -848,30 +866,30 @@ export function Editor({ id }: { id: string | null }) {
             <div className="preview-bar">
               <Segmented
                 className="view-switch"
-                label="Show"
+                label={e_.show}
                 value={view}
                 onChange={setView}
                 options={[
-                  { value: 'photo', label: 'Photo' },
-                  { value: 'pixels', label: 'Pixels' },
-                  { value: 'puzzle', label: 'Puzzle' },
-                  { value: 'solution', label: 'Solution' },
+                  { value: 'photo', label: e_.viewPhoto },
+                  { value: 'pixels', label: e_.viewPixels },
+                  { value: 'puzzle', label: e_.viewPuzzle },
+                  { value: 'solution', label: e_.viewSolution },
                 ]}
               />
               <span className="preview-meta">
-                <ModeChip mode={mode} name={def.name} />
-                <span>{puzzleSummary(puzzle)}</span>
-                {analysis && <SolvabilityChip analysis={analysis} />}
-                {busy && <span className="busy">Updating</span>}
+                <ModeChip mode={mode} name={t.modes[mode].name} />
+                <span>{puzzleSummary(puzzle, t)}</span>
+                {analysis && <SolvabilityChip analysis={analysis} t={t} />}
+                {busy && <span className="busy">{e_.updating}</span>}
               </span>
-              <div className="zoom-stepper" role="group" aria-label="Zoom">
-                <button className="btn ghost icon-only" onClick={() => zoomOut && setZoom(zoomOut)} disabled={!zoomOut} aria-label="Zoom out">
+              <div className="zoom-stepper" role="group" aria-label={e_.zoom}>
+                <button className="btn ghost icon-only" onClick={() => zoomOut && setZoom(zoomOut)} disabled={!zoomOut} aria-label={e_.zoomOut}>
                   <IconMinus size={16} />
                 </button>
-                <button className="zoom-value" onClick={() => setZoom(100)} title="Reset zoom">
+                <button className="zoom-value" onClick={() => setZoom(100)} title={e_.resetZoom}>
                   {zoom}%
                 </button>
-                <button className="btn ghost icon-only" onClick={() => zoomIn && setZoom(zoomIn)} disabled={!zoomIn} aria-label="Zoom in">
+                <button className="btn ghost icon-only" onClick={() => zoomIn && setZoom(zoomIn)} disabled={!zoomIn} aria-label={e_.zoomIn}>
                   <IconPlus size={16} />
                 </button>
               </div>
@@ -898,17 +916,15 @@ export function Editor({ id }: { id: string | null }) {
               <details className="rules" open={rulesOpen} onToggle={(e) => setRulesOpen(e.currentTarget.open)}>
                 <summary>
                   <IconInfo size={16} />
-                  How to play
+                  {e_.howToPlay}
                   <IconChevronDown size={16} className="rules-chevron" />
                 </summary>
-                <p>{def.rules}</p>
+                <p>{t.modes[mode].rules}</p>
               </details>
             )}
             {(view === 'puzzle' || view === 'solution') && analysis?.status === 'ambiguous' && (
               <div className="alert compact">
-                <span>
-                  The outlined cells can be shifted without changing a single clue, so the puzzle has more than one answer. Touch them up in Pixels, or nudge the threshold or crop.
-                </span>
+                <span>{e_.ambiguous}</span>
               </div>
             )}
             <div className={`preview view-${view}`} ref={previewRef}>
@@ -954,12 +970,12 @@ export function Editor({ id }: { id: string | null }) {
             <span className="empty-art">
               <Logo size={56} />
             </span>
-            <h2>Start with an image</h2>
-            <p>Mosaica turns a photo, a drawing or a logo into pixel art, and then into a puzzle you can print.</p>
+            <h2>{e_.startTitle}</h2>
+            <p>{e_.startLead}</p>
             <button className="btn primary large" onClick={chooseFile}>
-              <IconUpload /> Choose an image
+              <IconUpload /> {e_.chooseImage}
             </button>
-            <p className="muted small">Faces, animals, simple logos and high-contrast pictures work best. You can crop, rotate, remove the background and touch up the result afterwards.</p>
+            <p className="muted small">{e_.startTip}</p>
           </div>
         )}
       </main>
@@ -967,28 +983,14 @@ export function Editor({ id }: { id: string | null }) {
   );
 }
 
-const pct = (v: number) => (v === 0 ? 'off' : `${v}%`);
+const pct = (v: number) => (v === 0 ? tr().editor.off : `${v}%`);
 
-const CHECK_LABEL: Record<NonogramAnalysis['status'], string> = {
-  unique: 'Solvable by logic',
-  guess: 'One answer, needs guessing',
-  ambiguous: 'More than one answer',
-  unknown: 'Check timed out',
-};
-
-const CHECK_TITLE: Record<NonogramAnalysis['status'], string> = {
-  unique: 'Row and column logic alone reaches the picture.',
-  guess: 'Only one picture fits the clues, but solving it takes trial and error.',
-  ambiguous: 'Several pictures fit these clues. The cells that differ are outlined.',
-  unknown: 'The puzzle is too big to check quickly.',
-};
-
-function SolvabilityChip({ analysis }: { analysis: NonogramAnalysis }) {
+function SolvabilityChip({ analysis, t }: { analysis: NonogramAnalysis; t: Messages }) {
   const n = analysis.ambiguous.length;
   return (
-    <span className={`check check-${analysis.status}`} title={CHECK_TITLE[analysis.status]}>
-      {CHECK_LABEL[analysis.status]}
-      {analysis.status === 'ambiguous' && ` · ${n} cells`}
+    <span className={`check check-${analysis.status}`} title={t.editor.checkTitle[analysis.status]}>
+      {t.editor.check[analysis.status]}
+      {analysis.status === 'ambiguous' && t.editor.checkCells(n)}
     </span>
   );
 }

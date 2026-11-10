@@ -1,3 +1,4 @@
+import { tr } from '../i18n';
 import type { MosaicRecord } from '../types';
 
 const DB_NAME = 'mosaica';
@@ -18,7 +19,7 @@ function openDb(): Promise<IDBDatabase> {
       }
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error ?? new Error('Could not open the mosaic database.'));
+    req.onerror = () => reject(req.error ?? new Error(tr().errors.dbOpen));
   });
   return dbPromise;
 }
@@ -26,7 +27,7 @@ function openDb(): Promise<IDBDatabase> {
 function request<T>(r: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     r.onsuccess = () => resolve(r.result);
-    r.onerror = () => reject(r.error ?? new Error('Database request failed.'));
+    r.onerror = () => reject(r.error ?? new Error(tr().errors.dbRequest));
   });
 }
 

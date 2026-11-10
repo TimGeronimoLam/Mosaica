@@ -1,8 +1,8 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import type { MosaicRecord, Orientation, PaperSize } from '../types';
-import { MODE_BY_ID } from '../lib/modes';
 import { PuzzleSvg, puzzleSummary } from './PuzzleSvg';
 import { Logo } from './Header';
+import { useT } from '../i18n';
 
 export const PAPER_MM: Record<PaperSize, [number, number]> = {
   A4: [210, 297],
@@ -67,21 +67,22 @@ export function PuzzleSheet({
   showRules: boolean;
   page?: number;
 }) {
-  const def = MODE_BY_ID[record.mode];
+  const t = useT();
+  const text = t.modes[record.mode];
   return (
     <Sheet className={solution ? 'solution-sheet' : ''}>
       <div className="sheet-head">
         <div className="sheet-title-row">
           {number !== undefined && <span className="sheet-number">{number}</span>}
           <h2 className="sheet-title">
-            {record.title || 'Untitled mosaic'}
-            {solution && <span className="sheet-solution-tag">Solution</span>}
+            {record.title || t.untitled}
+            {solution && <span className="sheet-solution-tag">{t.sheet.solution}</span>}
           </h2>
           <span className="sheet-meta">
-            {def.name} · {puzzleSummary(record.puzzle)}
+            {text.name} · {puzzleSummary(record.puzzle, t)}
           </span>
         </div>
-        {showRules && !solution && <p className="sheet-rules">{def.rules}</p>}
+        {showRules && !solution && <p className="sheet-rules">{text.rules}</p>}
       </div>
       <div className="sheet-body">
         <PuzzleSvg puzzle={record.puzzle} solution={solution} />

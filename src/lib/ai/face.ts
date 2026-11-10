@@ -1,3 +1,4 @@
+import { tr } from '../../i18n';
 import { convexHull, fillPolygon, growMask, type Rgba } from '../mask';
 
 /**
@@ -28,7 +29,7 @@ type Landmarker = import('@mediapipe/tasks-vision').FaceLandmarker;
 let landmarker: Promise<Landmarker> | null = null;
 
 async function load(onProgress: Progress): Promise<Landmarker> {
-  onProgress('Loading the face model…');
+  onProgress(tr().ai.loadingFaceModel);
   const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision');
   const vision = await FilesetResolver.forVisionTasks(WASM_URL);
   const options = (delegate: 'GPU' | 'CPU') => ({ baseOptions: { modelAssetPath: MODEL_URL, delegate }, runningMode: 'IMAGE' as const, numFaces: 4 });
@@ -47,12 +48,12 @@ export async function findFaceDetails(src: Rgba, onProgress: Progress): Promise<
   }
   const lm = await landmarker;
   const { FaceLandmarker } = await import('@mediapipe/tasks-vision');
-  onProgress('Finding faces…');
+  onProgress(tr().ai.findingFaces);
   const canvas = document.createElement('canvas');
   canvas.width = src.width;
   canvas.height = src.height;
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas is not available in this browser.');
+  if (!ctx) throw new Error(tr().errors.canvas);
   ctx.putImageData(new ImageData(new Uint8ClampedArray(src.data), src.width, src.height), 0, 0);
   const result = lm.detect(canvas);
   const { width: w, height: h } = src;

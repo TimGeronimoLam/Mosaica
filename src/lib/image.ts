@@ -1,3 +1,4 @@
+import { tr } from '../i18n';
 import type { CropRect } from './crop';
 import { multiply, scaleOf, scaling, transformFor, type Affine, type PhotoTransform } from './transform';
 
@@ -18,7 +19,7 @@ export function loadImageElement(blob: Blob): Promise<HTMLImageElement> {
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new Error('Could not decode this image.'));
+      reject(new Error(tr().errors.decode));
     };
     img.src = url;
   });
@@ -33,7 +34,7 @@ export function rasterize(img: HTMLImageElement, maxSize = 1024): SourceRaster {
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) throw new Error('Canvas is not available in this browser.');
+  if (!ctx) throw new Error(tr().errors.canvas);
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, w, h);
   ctx.imageSmoothingEnabled = true;
@@ -66,7 +67,7 @@ export function renderTransformed(img: HTMLImageElement, t: PhotoTransform, maxS
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) throw new Error('Canvas is not available in this browser.');
+  if (!ctx) throw new Error(tr().errors.canvas);
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, width, height);
   ctx.imageSmoothingEnabled = true;
@@ -113,7 +114,7 @@ export function createCropRenderer(img: HTMLImageElement, photo: TransformedPhot
       canvas.width = DW;
       canvas.height = DH;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) throw new Error('Canvas is not available in this browser.');
+      if (!ctx) throw new Error(tr().errors.canvas);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, DW, DH);

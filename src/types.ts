@@ -11,7 +11,8 @@ export type ModeId =
   | 'fillapix'
   | 'logipix'
   | 'labymage'
-  | 'dots';
+  | 'dots'
+  | 'whodunit';
 
 /** How the source image is reduced to cells for a given mode. */
 export type PixelKind = 'binary' | 'palette' | 'mystery';
@@ -22,6 +23,7 @@ export type CellColor = 'average' | 'main';
 export type DitherStyle = 'pattern' | 'diffusion';
 export type SumOps = 'add' | 'addsub' | 'mul' | 'mixed';
 export type Difficulty = 'easy' | 'normal';
+export type WhodunitDifficulty = Difficulty | 'hard';
 
 export interface MosaicSettings {
   gridWidth: number;
@@ -102,6 +104,9 @@ export interface MosaicSettings {
   fillapixDifficulty: Difficulty;
   /** Labymage: how twisty the decoy corridors are (0..100). */
   mazeTwist: number;
+  /** Whodunit: people on the floor plan (victim included) and how much the clues give away. */
+  whodunitSize: number;
+  whodunitDifficulty: WhodunitDifficulty;
   /** Seed for every random choice so a saved puzzle regenerates identically. */
   seed: number;
 }
@@ -223,6 +228,51 @@ export interface DotsPuzzle {
   total: number;
 }
 
+export type WhodunitRoomKind = 'kitchen' | 'living' | 'study' | 'bedroom' | 'hallway' | 'balcony' | 'bathroom';
+export type WhodunitObjectKind = 'bread' | 'crochet' | 'bags' | 'ivy' | 'desk' | 'futon' | 'bong';
+export type Compass = 'N' | 'E' | 'S' | 'W';
+
+/** A statement about where `who` (an index into `people`) was. */
+export type WhodunitClue =
+  | { type: 'room'; who: number; room: number }
+  | { type: 'notRoom'; who: number; room: number }
+  | { type: 'on'; who: number; object: WhodunitObjectKind }
+  | { type: 'beside'; who: number; object: WhodunitObjectKind }
+  | { type: 'alone'; who: number }
+  | { type: 'sameRoom'; who: number; other: number }
+  | { type: 'apart'; who: number; other: number }
+  | { type: 'dir'; who: number; other: number; dir: Compass };
+
+export interface WhodunitObject {
+  kind: WhodunitObjectKind;
+  /** One cell, or two side by side for the wide pieces of furniture. */
+  cells: number[];
+}
+
+export interface WhodunitPerson {
+  name: string;
+  /** Square portrait as a JPEG data URL; a lettered token is drawn without one. */
+  photo?: string;
+}
+
+export interface WhodunitPuzzle {
+  kind: 'whodunit';
+  /** The floor plan is square: one person per row and per column. */
+  width: number;
+  height: number;
+  /** Room index per cell. */
+  rooms: number[];
+  roomKinds: WhodunitRoomKind[];
+  objects: WhodunitObject[];
+  /** Everyone in the flat. Index 0 is the victim. */
+  people: WhodunitPerson[];
+  clues: WhodunitClue[];
+  /** Cell of each person. */
+  solution: number[];
+  /** The one person alone in a room with the victim. */
+  murderer: number;
+}
+
 export type Puzzle =
   | NonogramPuzzle
   | ColorByCodePuzzle
@@ -230,7 +280,8 @@ export type Puzzle =
   | FillAPixPuzzle
   | LogipixPuzzle
   | LabymagePuzzle
-  | DotsPuzzle;
+  | DotsPuzzle
+  | WhodunitPuzzle;
 
 /* ---------- Persistence ---------- */
 

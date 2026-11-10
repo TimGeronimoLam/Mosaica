@@ -182,6 +182,7 @@ export const MODE_TINT: Record<ModeId, { fg: string; bg: string }> = {
   logipix: { fg: '#08875f', bg: '#dcf5ec' },
   labymage: { fg: '#c9431d', bg: '#fdeae3' },
   dots: { fg: '#0b7285', bg: '#ddf2f5' },
+  whodunit: { fg: '#6b4a12', bg: '#f3e9cf' },
 };
 
 /** 3×3 cell positions on a 24px canvas. */
@@ -408,6 +409,15 @@ export function ModeIcon({ mode, size = 22 }: { mode: ModeId; size?: number }) {
           <circle cx="15.5" cy="4" r="2" fill="currentColor" stroke="none" />
           <circle cx="19.5" cy="12" r="2" fill="currentColor" stroke="none" />
           <circle cx="13" cy="19.5" r="2" fill="none" />
+        </Svg>
+      );
+    case 'whodunit':
+      return (
+        <Svg size={size} strokeWidth={1.8}>
+          <circle cx="10.5" cy="10.5" r="7" />
+          <path d="M15.7 15.7 21 21" strokeWidth={2.4} />
+          <path d="M8.4 8.6a2.2 2.2 0 1 1 3.2 2c-.7.4-1.1.8-1.1 1.6" strokeWidth={1.5} />
+          <circle cx="10.5" cy="14.3" r="0.9" fill="currentColor" stroke="none" />
         </Svg>
       );
   }

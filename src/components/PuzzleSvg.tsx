@@ -1,7 +1,9 @@
 import type { Puzzle } from '../types';
+import type { Messages } from '../i18n';
 import { ColorByCodeSvg, FillAPixSvg, LogipixSvg, MysterySvg, NonogramSvg } from './svg/Grids';
 import { LabymageSvg } from './svg/Labymage';
 import { DotsSvg } from './svg/Dots';
+import { WhodunitSvg } from './svg/Whodunit';
 
 /** `marks` outlines cells (row-major indices) the editor wants to point at, e.g. an ambiguity. */
 export function PuzzleSvg({ puzzle, solution = false, marks }: { puzzle: Puzzle; solution?: boolean; marks?: number[] }) {
@@ -20,23 +22,28 @@ export function PuzzleSvg({ puzzle, solution = false, marks }: { puzzle: Puzzle;
       return <LabymageSvg puzzle={puzzle} solution={solution} />;
     case 'dots':
       return <DotsSvg puzzle={puzzle} solution={solution} />;
+    case 'whodunit':
+      return <WhodunitSvg puzzle={puzzle} solution={solution} />;
   }
 }
 
 /** Short description printed next to the title, e.g. "30 × 40 cells · dots 1–270". */
-export function puzzleSummary(p: Puzzle): string {
+export function puzzleSummary(p: Puzzle, t: Messages): string {
+  const s = t.summary;
   switch (p.kind) {
     case 'dots':
-      return `${p.width} × ${p.height} · dots 1–${p.total}`;
+      return s.dots(p.width, p.height, p.total);
     case 'labymage':
-      return `maze ${p.width} × ${p.height}`;
+      return s.maze(p.width, p.height);
     case 'fillapix':
-      return `${p.width} × ${p.height} · ${p.clues.filter((c) => c >= 0).length} clues`;
+      return s.clues(p.width, p.height, p.clues.filter((c) => c >= 0).length);
     case 'logipix':
-      return `${p.width} × ${p.height} · ${p.paths.length} paths`;
+      return s.paths(p.width, p.height, p.paths.length);
+    case 'whodunit':
+      return s.whodunit(p.width, p.people.length - 1);
     case 'colorByCode':
-      return `${p.width} × ${p.height} · ${p.legend.length} codes`;
+      return s.codes(p.width, p.height, p.legend.length);
     default:
-      return `${p.width} × ${p.height}`;
+      return s.size(p.width, p.height);
   }
 }

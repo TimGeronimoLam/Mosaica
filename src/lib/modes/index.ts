@@ -6,6 +6,7 @@ import { generateLabymage } from './labymage';
 import { generateLogipix } from './logipix';
 import { generateMystery } from './mystery';
 import { generateNonogram } from './nonogram';
+import { generateWhodunit } from './whodunit';
 
 export type SettingKey =
   | 'threshold'
@@ -20,10 +21,6 @@ export type SettingKey =
 
 export interface ModeDef {
   id: ModeId;
-  name: string;
-  tagline: string;
-  /** Printed under the puzzle title so the solver knows what to do. */
-  rules: string;
   kind: (s: MosaicSettings) => PixelKind;
   /** Which optional setting groups the sidebar shows. */
   settings: SettingKey[];
@@ -31,6 +28,8 @@ export interface ModeDef {
   maxWidth: number;
   /** Settings forced on by the mode. */
   force?: Partial<MosaicSettings>;
+  /** Made in its own editor from several photos, not from the pixel art of one picture. */
+  standalone?: boolean;
   /** Defaults applied when the mode is chosen (the user can still change them). */
   defaults?: Partial<MosaicSettings>;
   generate: (grid: PixelGrid, s: MosaicSettings) => Puzzle;
@@ -39,10 +38,6 @@ export interface ModeDef {
 export const MODES: ModeDef[] = [
   {
     id: 'nonogram',
-    name: 'Nonogram',
-    tagline: 'One colour. Row and column clues.',
-    rules:
-      'The numbers tell you the lengths of the runs of filled cells in that row or column, in order. Runs are separated by at least one empty cell. Fill the right cells to reveal the picture.',
     kind: () => 'binary',
     settings: ['threshold', 'dither'],
     defaultWidth: 30,
@@ -51,10 +46,6 @@ export const MODES: ModeDef[] = [
   },
   {
     id: 'colorNonogram',
-    name: 'Colour nonogram',
-    tagline: 'Several colours. Clues carry their colour.',
-    rules:
-      'Each clue gives the length and colour of a run of cells in that row or column, in order. Runs of different colours may touch; runs of the same colour are separated by at least one empty cell.',
     kind: () => 'palette',
     settings: ['colors', 'dither'],
     defaultWidth: 25,
@@ -64,9 +55,6 @@ export const MODES: ModeDef[] = [
   },
   {
     id: 'colorByCode',
-    name: 'Colour by code',
-    tagline: 'Every cell has a number. Colour it in.',
-    rules: 'Colour each cell with the colour matching its code in the legend. Cells marked 0 stay white.',
     kind: () => 'palette',
     settings: ['colors', 'blankLightest', 'dither', 'labelStyle'],
     defaultWidth: 30,
@@ -75,10 +63,6 @@ export const MODES: ModeDef[] = [
   },
   {
     id: 'mystery',
-    name: 'Mystery portrait',
-    tagline: 'Codes 0 to 9 are shapes. Great for faces.',
-    rules:
-      'Each code stands for a shape shown in the legend: 0 is empty, 9 is fully black, the others are half squares and triangles. Draw the shape in each cell and a portrait appears. Works best with a photo of a face.',
     kind: () => 'mystery',
     settings: ['threshold', 'dither'],
     defaultWidth: 30,
@@ -88,10 +72,6 @@ export const MODES: ModeDef[] = [
   },
   {
     id: 'fillapix',
-    name: 'Fill-a-Pix',
-    tagline: 'Minesweeper-style logic. Count the 3x3 block.',
-    rules:
-      'A number says how many of the cells in the 3x3 block around it (including itself) are filled. Use logic to decide which cells to fill. Shaded cells are given.',
     kind: () => 'binary',
     settings: ['threshold', 'fillapix'],
     defaultWidth: 25,
@@ -100,10 +80,6 @@ export const MODES: ModeDef[] = [
   },
   {
     id: 'logipix',
-    name: 'Logipix',
-    tagline: 'Link pairs of numbers with paths of that length.',
-    rules:
-      'Join each pair of equal numbers with a path of exactly that many cells, including both ends. Paths turn only at right angles and never cross. A 1 is a single cell and two 2s sit side by side. Shade every path.',
     kind: (s) => (s.logipixColor ? 'palette' : 'binary'),
     settings: ['threshold', 'colors', 'logipix'],
     defaultWidth: 25,
@@ -113,10 +89,6 @@ export const MODES: ModeDef[] = [
   },
   {
     id: 'labymage',
-    name: 'Labymage',
-    tagline: 'A maze. Shade your route to find the picture.',
-    rules:
-      'Find the way from the entrance arrow to the exit arrow. As you go, shade every corridor you are sure of. The route itself draws the picture.',
     kind: () => 'binary',
     settings: ['threshold', 'maze'],
     defaultWidth: 24,
@@ -125,17 +97,28 @@ export const MODES: ModeDef[] = [
   },
   {
     id: 'dots',
-    name: 'Connect the dots',
-    tagline: 'Numbered dots along the outline.',
-    rules:
-      'Join the dots in order, starting at the circled 1. When you reach a star, close the shape by drawing back to the circled dot where that section started, then carry on from the next number.',
     kind: () => 'binary',
     settings: ['threshold', 'dots'],
     defaultWidth: 60,
     maxWidth: 120,
     generate: (g, s) => generateDots(g, { detail: s.dotsDetail, minRegion: s.dotsMinRegion, maxDots: s.dotsMaxDots, maxGap: s.dotsMaxGap }),
   },
+  {
+    id: 'whodunit',
+    kind: () => 'palette',
+    settings: [],
+    defaultWidth: 6,
+    maxWidth: 8,
+    standalone: true,
+    generate: (_g, s) => generateWhodunit({ size: s.whodunitSize, difficulty: s.whodunitDifficulty, seed: s.seed }),
+  },
 ];
+
+/** Where a mosaic of this mode is edited. */
+export function editorPath(mode: ModeId, id?: string): string {
+  const base = MODE_BY_ID[mode]?.standalone ? '/whodunit' : id ? '/edit' : '/new';
+  return id ? `${base}/${id}` : base;
+}
 
 export const MODE_BY_ID: Record<ModeId, ModeDef> = Object.fromEntries(MODES.map((m) => [m.id, m])) as Record<ModeId, ModeDef>;
 
@@ -183,6 +166,8 @@ export function defaultSettings(mode: ModeId, seed: number): MosaicSettings {
     logipixColor: false,
     fillapixDifficulty: 'normal',
     mazeTwist: 70,
+    whodunitSize: 6,
+    whodunitDifficulty: 'normal',
     seed,
     ...def.defaults,
     ...def.force,

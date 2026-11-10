@@ -23,17 +23,8 @@ export interface CropRect {
 
 export type CropRatio = 'free' | 'photo' | '1:1' | '4:3' | '3:4' | '3:2' | '2:3' | '16:9' | '9:16';
 
-export const CROP_RATIOS: { value: CropRatio; label: string }[] = [
-  { value: 'free', label: 'Free' },
-  { value: 'photo', label: 'Like the photo' },
-  { value: '1:1', label: 'Square' },
-  { value: '4:3', label: '4:3 landscape' },
-  { value: '3:4', label: '3:4 portrait' },
-  { value: '3:2', label: '3:2 landscape' },
-  { value: '2:3', label: '2:3 portrait' },
-  { value: '16:9', label: '16:9 wide' },
-  { value: '9:16', label: '9:16 tall' },
-];
+/** Crop shapes offered in the editor, in menu order (labels live in the i18n messages). */
+export const CROP_RATIOS: CropRatio[] = ['free', 'photo', '1:1', '4:3', '3:4', '3:2', '2:3', '16:9', '9:16'];
 
 export const FULL_CROP: CropBox = { x: 0, y: 0, w: 1, h: 1 };
 

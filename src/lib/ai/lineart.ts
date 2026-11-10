@@ -1,3 +1,4 @@
+import { tr } from '../../i18n';
 import type { Rgba } from '../mask';
 
 /**
@@ -47,8 +48,8 @@ async function loadRunner(onProgress: Progress): Promise<Runner> {
       files.set(p.file, p.progress ?? 0);
       let sum = 0;
       for (const v of files.values()) sum += v;
-      onProgress(`Downloading the model… ${Math.round(sum / files.size)}%`);
-    } else if (p.status === 'ready') onProgress('Tracing the outlines…');
+      onProgress(tr().ai.downloading(Math.round(sum / files.size)));
+    } else if (p.status === 'ready') onProgress(tr().ai.tracing);
   };
   // The repository holds a bare model.onnx (no config.json, no onnx/ folder), so the
   // generic model class is used with an inline config and the file named outright.
@@ -63,7 +64,7 @@ async function loadRunner(onProgress: Progress): Promise<Runner> {
   return async (planes, width, height) => {
     const out = await model({ input: new tf.Tensor('float32', planes, [1, 3, height, width]) });
     const t = out.output ?? Object.values(out)[0];
-    if (!t || t.dims.length !== 4) throw new Error('The line-art model gave an unexpected result.');
+    if (!t || t.dims.length !== 4) throw new Error(tr().errors.lineartResult);
     return { width: t.dims[3], height: t.dims[2], data: Float32Array.from(t.data as Float32Array) };
   };
 }
@@ -74,13 +75,13 @@ async function loadRunner(onProgress: Progress): Promise<Runner> {
  * network, unsupported browser).
  */
 export async function traceOutlines(src: Rgba, onProgress: Progress): Promise<Uint8Array> {
-  onProgress('Loading the model…');
+  onProgress(tr().ai.loadingModel);
   if (!runner) {
     runner = loadRunner(onProgress);
     runner.catch(() => (runner = null));
   }
   const run = await runner;
-  onProgress('Tracing the outlines…');
+  onProgress(tr().ai.tracing);
   const { width: w, height: h } = src;
   const W = Math.ceil(w / STRIDE) * STRIDE;
   const H = Math.ceil(h / STRIDE) * STRIDE;

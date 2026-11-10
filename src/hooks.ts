@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { listMosaics } from './lib/db';
 import { initHistory, pushHistory, redoHistory, undoHistory, type History } from './lib/history';
 import type { MosaicRecord } from './types';
+import { tr } from './i18n';
 
 export function useMosaics() {
   const [mosaics, setMosaics] = useState<MosaicRecord[]>([]);
@@ -24,7 +25,7 @@ export function useMosaics() {
 }
 
 export function formatDate(ts: number): string {
-  return new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  return new Date(ts).toLocaleDateString(tr().locale, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 /** State with undo/redo. `set` takes an optional merge key so one slider drag is one undo step. */

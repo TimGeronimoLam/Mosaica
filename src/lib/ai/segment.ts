@@ -1,3 +1,4 @@
+import { tr } from '../../i18n';
 import type { Rgba } from '../mask';
 
 /**
@@ -15,9 +16,6 @@ import type { Rgba } from '../mask';
 export type SubjectModel = 'portrait' | 'any';
 
 export interface SubjectModelInfo {
-  label: string;
-  /** Shown next to the choice. */
-  note: string;
   /** Hugging Face model id. */
   id: string;
   task: 'background-removal' | 'image-segmentation';
@@ -27,15 +25,11 @@ export interface SubjectModelInfo {
 
 export const SUBJECT_MODELS: Record<SubjectModel, SubjectModelInfo> = {
   portrait: {
-    label: 'People (fast, 25 MB)',
-    note: 'MODNet, a portrait matting model. Best for photos of people; small and quick.',
     id: 'Xenova/modnet',
     task: 'background-removal',
     dtype: 'fp32',
   },
   any: {
-    label: 'Any subject (94 MB, slow)',
-    note: 'BiRefNet lite at 512 px, a general subject segmentation model. Works for pets, objects and people; a big download and about 15 s per photo.',
     // The onnx-community export has a fixed 1024 px input and runs out of WebAssembly memory; this one is exported at 512 px.
     id: 'studioludens/birefnet-lite-512',
     task: 'image-segmentation',
@@ -70,8 +64,8 @@ async function loadRunner(model: SubjectModel, onProgress: Progress): Promise<Ru
       files.set(p.file, p.progress ?? 0);
       let sum = 0;
       for (const v of files.values()) sum += v;
-      onProgress(`Downloading the model… ${Math.round(sum / files.size)}%`);
-    } else if (p.status === 'ready') onProgress('Finding the subject…');
+      onProgress(tr().ai.downloading(Math.round(sum / files.size)));
+    } else if (p.status === 'ready') onProgress(tr().ai.findingSubject);
   };
   const options = { device: 'wasm' as const, dtype: info.dtype, progress_callback };
   if (info.task === 'background-removal') {
@@ -97,7 +91,7 @@ async function loadRunner(model: SubjectModel, onProgress: Progress): Promise<Ru
  * cannot be loaded (no network, unsupported browser).
  */
 export async function findSubject(src: Rgba, model: SubjectModel, onProgress: Progress): Promise<Uint8Array> {
-  onProgress('Loading the model…');
+  onProgress(tr().ai.loadingModel);
   let runner = runners.get(model);
   if (!runner) {
     runner = loadRunner(model, onProgress);
@@ -105,7 +99,7 @@ export async function findSubject(src: Rgba, model: SubjectModel, onProgress: Pr
     runner.catch(() => runners.delete(model));
   }
   const run = await runner;
-  onProgress('Finding the subject…');
+  onProgress(tr().ai.findingSubject);
   const { RawImage } = await import('@huggingface/transformers');
   const img = new RawImage(new Uint8ClampedArray(src.data), src.width, src.height, 4);
   const soft = await run(img);

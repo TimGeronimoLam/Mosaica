@@ -1,3 +1,4 @@
+import { tr } from '../i18n';
 import type { MosaicRecord } from '../types';
 import { newId } from './db';
 
@@ -36,7 +37,7 @@ export async function exportMosaics(records: MosaicRecord[]): Promise<MosaicExpo
 export async function importMosaics(json: unknown): Promise<MosaicRecord[]> {
   const data = json as Partial<MosaicExport>;
   if (!data || data.app !== 'mosaica' || !Array.isArray(data.mosaics)) {
-    throw new Error('This file is not a Mosaica export.');
+    throw new Error(tr().errors.notExport);
   }
   const out: MosaicRecord[] = [];
   for (const m of data.mosaics) {

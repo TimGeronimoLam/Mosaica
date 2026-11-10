@@ -5,6 +5,7 @@ import { BLANK, editCount, floodCells, remapEdits, resolveToken, setCells, token
 import { MYSTERY_POLYGONS } from '../lib/pixelize';
 import { IconBucket, IconEraser, IconPencil, IconPipette, IconTrash } from './Icons';
 import { capture, Segmented, Toggle } from './ui';
+import { useT, type Messages } from '../i18n';
 
 export interface PixelTools {
   tool: 'pencil' | 'fill' | 'pick' | 'revert';
@@ -25,15 +26,15 @@ interface Swatch {
   shape?: number;
 }
 
-export function swatchesFor(grid: PixelGrid): Swatch[] {
-  if (grid.kind === 'mystery') return MYSTERY_POLYGONS.map((_, v) => ({ token: tokenForValue(grid, v), label: v === 0 ? 'Blank (0)' : `Shape ${v}`, shape: v }));
+export function swatchesFor(grid: PixelGrid, t: Messages['pixels']): Swatch[] {
+  if (grid.kind === 'mystery') return MYSTERY_POLYGONS.map((_, v) => ({ token: tokenForValue(grid, v), label: v === 0 ? t.blank : t.shape(v), shape: v }));
   if (grid.kind === 'binary') {
     return [
       { token: BLANK, label: 'Blank', color: '#ffffff' },
       { token: '#000000', label: 'Ink', color: '#111111' },
     ];
   }
-  return grid.palette.map((color, i) => ({ token: tokenForValue(grid, i), label: grid.blank && i === 0 ? 'Blank (0)' : `Colour ${i}`, color }));
+  return grid.palette.map((color, i) => ({ token: tokenForValue(grid, i), label: grid.blank && i === 0 ? t.blank : t.colour(i), color }));
 }
 
 function drawShape(ctx: CanvasRenderingContext2D, v: number, x: number, y: number, s: number) {
@@ -280,41 +281,42 @@ interface ToolbarProps {
 }
 
 export function PixelToolbar({ grid, edits, tools, onTools, onEdits }: ToolbarProps) {
-  const swatches = swatchesFor(grid);
+  const t = useT().pixels;
+  const swatches = swatchesFor(grid, t);
   const count = editCount(edits);
   const current = resolveToken(grid, tools.token);
   const hint =
     tools.tool === 'pencil'
-      ? 'Paint cells with the chosen colour. Your touch-ups stay when you change other settings.'
+      ? t.hintPencil
       : tools.tool === 'fill'
-        ? 'Click a cell to recolour the whole area of that colour joined to it.'
+        ? t.hintFill
         : tools.tool === 'pick'
-          ? 'Click a cell to pick up its colour.'
-          : 'Brush over touched-up cells to give them back to the automatic result.';
+          ? t.hintPick
+          : t.hintRevert;
   return (
-    <div className="stage-tools" role="toolbar" aria-label="Pixel tools">
+    <div className="stage-tools" role="toolbar" aria-label={t.tools}>
       <div className="tool-row">
         <Segmented
-          label="Tool"
+          label={t.tool}
           value={tools.tool}
           onChange={(tool) => onTools({ tool })}
           options={[
-            { value: 'pencil', label: 'Pencil', icon: <IconPencil size={16} /> },
-            { value: 'fill', label: 'Fill', icon: <IconBucket size={16} /> },
-            { value: 'pick', label: 'Pick', icon: <IconPipette size={16} /> },
-            { value: 'revert', label: 'Revert', icon: <IconEraser size={16} /> },
+            { value: 'pencil', label: t.pencil, icon: <IconPencil size={16} /> },
+            { value: 'fill', label: t.fill, icon: <IconBucket size={16} /> },
+            { value: 'pick', label: t.pick, icon: <IconPipette size={16} /> },
+            { value: 'revert', label: t.revert, icon: <IconEraser size={16} /> },
           ]}
         />
         {(tools.tool === 'pencil' || tools.tool === 'revert') && (
           <Segmented
-            label="Brush size"
+            label={t.brushSize}
             value={String(tools.size)}
             onChange={(v) => onTools({ size: Number(v) })}
             options={[1, 2, 3, 5].map((n) => ({ value: String(n), label: `${n}×${n}` }))}
           />
         )}
       </div>
-      <div className="swatches" role="radiogroup" aria-label="Paint colour">
+      <div className="swatches" role="radiogroup" aria-label={t.paintColour}>
         {swatches.map((s) => {
           const on = tools.tool !== 'revert' && resolveToken(grid, s.token) === current;
           return (
@@ -334,10 +336,10 @@ export function PixelToolbar({ grid, edits, tools, onTools, onEdits }: ToolbarPr
         })}
       </div>
       <div className="tool-row">
-        <Toggle label="Photo underneath" checked={tools.underlay} onChange={(underlay) => onTools({ underlay })} />
-        <Toggle label="Mark touch-ups" checked={tools.marks} onChange={(marks) => onTools({ marks })} />
+        <Toggle label={t.underlay} checked={tools.underlay} onChange={(underlay) => onTools({ underlay })} />
+        <Toggle label={t.marks} checked={tools.marks} onChange={(marks) => onTools({ marks })} />
         <button className="btn small ghost" onClick={() => onEdits(null)} disabled={!count}>
-          <IconTrash size={16} /> Clear {count ? `${count} touch-up${count === 1 ? '' : 's'}` : 'touch-ups'}
+          <IconTrash size={16} /> {t.clear(count)}
         </button>
       </div>
       <p className="hint">{hint}</p>

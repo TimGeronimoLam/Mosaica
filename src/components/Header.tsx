@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { href, useRoute } from '../router';
+import { LANGS, useI18n } from '../i18n';
 import { IconBook, IconMosaics, IconPlus } from './Icons';
 
 export function Logo({ size = 22 }: { size?: number }) {
@@ -18,6 +19,7 @@ export function Logo({ size = 22 }: { size?: number }) {
 
 export function Header() {
   const route = useRoute();
+  const { t, lang, setLang } = useI18n();
   const first = route.segments[0] ?? '';
   const link = (path: string, icon: ReactNode, full: string, short: string, active: boolean) => (
     <a className={active ? 'nav-link active' : 'nav-link'} href={href(path)} aria-current={active ? 'page' : undefined}>
@@ -30,15 +32,22 @@ export function Header() {
   );
   return (
     <header className="header no-print">
-      <a className="brand" href={href('/')} aria-label="Mosaica home">
+      <a className="brand" href={href('/')} aria-label={t.header.home}>
         <Logo size={26} />
         <span className="brand-name">Mosaica</span>
       </a>
-      <nav className="nav" aria-label="Main">
-        {link('/', <IconMosaics size={16} />, 'My mosaics', 'Mosaics', first === '')}
-        {link('/new', <IconPlus size={16} />, 'New mosaic', 'New', first === 'new' || first === 'edit')}
-        {link('/book', <IconBook size={16} />, 'Print a book', 'Book', first === 'book')}
+      <nav className="nav" aria-label={t.header.main}>
+        {link('/', <IconMosaics size={16} />, t.header.mosaics, t.header.mosaicsShort, first === '')}
+        {link('/new', <IconPlus size={16} />, t.header.newMosaic, t.header.newShort, first === 'new' || first === 'edit')}
+        {link('/book', <IconBook size={16} />, t.header.book, t.header.bookShort, first === 'book')}
       </nav>
+      <div className="lang-switch" role="group" aria-label={t.language}>
+        {LANGS.map((l) => (
+          <button key={l.value} type="button" lang={l.value} className={l.value === lang ? 'on' : ''} aria-pressed={l.value === lang} title={l.name} onClick={() => setLang(l.value)}>
+            {l.label}
+          </button>
+        ))}
+      </div>
     </header>
   );
 }
